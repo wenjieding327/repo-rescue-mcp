@@ -46,11 +46,12 @@ def inspect_github_project(repo_url: str) -> dict[str, Any]:
 
 @mcp.tool()
 def reproduce_python_project(repo_url: str) -> dict[str, Any]:
-    """Run an explicitly allow-listed public Python repository in constrained Docker containers.
+    """Run an explicitly allow-listed public Python repository and record evidence.
 
-    Dependency installation and execution are separate. Project execution has
-    no network, one CPU, bounded memory/processes/time and no host secrets. The
-    tool refuses arbitrary repositories and arbitrary shell commands.
+    The Docker backend separates installation from offline, resource-constrained
+    execution. Managed hosts can use a timeout-bounded direct fallback for the
+    same fixed repository and command allow-lists. Arbitrary shell commands are
+    never accepted.
     """
     try:
         with clone_public_repository(repo_url) as snapshot:
