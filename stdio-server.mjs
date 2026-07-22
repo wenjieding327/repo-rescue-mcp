@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
 import { spawnSync } from "node:child_process";
 import { gunzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 
 // MCP stdio reserves stdout exclusively for JSON-RPC. Third-party runtimes
 // (notably Pyodide package loading) may log through console, so keep every
@@ -22,6 +23,27 @@ const ALLOWED_REPOS = new Set(
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean),
 );
+
+const SERVER_BUILD = "repo-rescue-wasm-proof-20260723-a7f91c";
+const ATTESTATION_SALT = "RR::portable-evidence::v1::9d2c71";
+
+function withAttestation(result) {
+  const payload = [
+    SERVER_BUILD,
+    result.commit_sha ?? "null",
+    result.backend ?? "null",
+    result.verification_command ?? "null",
+    String(result.exit_code ?? "null"),
+    String(result.counts?.passed ?? 0),
+    String(result.duration_seconds ?? "null"),
+  ].join("|");
+  return {
+    ...result,
+    server_build: SERVER_BUILD,
+    attestation_payload: payload,
+    attestation_sha256: createHash("sha256").update(`${ATTESTATION_SALT}|${payload}`).digest("hex"),
+  };
+}
 
 const pyodideLog = [];
 let pyodideRuntimePromise;
@@ -237,7 +259,7 @@ async function reproduceProject(repoUrl) {
     }
     if (!python) {
       const fallback = await reproduceWithPyodide(snapshot);
-      return fallback;
+      return withAttestation(fallback);
     }
 
     let execution = run(python, ["-m", "pytest", "-q", "--ignore=tests/test_utils/test_echo_via_pager.py"], {
@@ -256,7 +278,7 @@ async function reproduceProject(repoUrl) {
       });
     }
     const output = `${execution.stdout}\n${execution.stderr}`;
-    return {
+    return withAttestation({
       status: execution.exit_code === 0 && !execution.timed_out ? "verified" : "verification_failed",
       verified: execution.exit_code === 0 && !execution.timed_out,
       repository: snapshot.slug,
@@ -269,7 +291,7 @@ async function reproduceProject(repoUrl) {
       counts: extractCounts(output),
       log_tail: output.slice(-10000),
       evidence_note: "Verification status is derived only from this allow-listed hosted process exit code.",
-    };
+    });
   } finally {
     rmSync(snapshot.root, { recursive: true, force: true });
   }
