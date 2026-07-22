@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, normalize } from "node:path";
 import { spawnSync } from "node:child_process";
+import { gunzipSync } from "node:zlib";
 
 const ALLOWED_REPOS = new Set(
   (process.env.REPO_RESCUE_ALLOWED_REPOS || "pallets/click")
@@ -68,23 +69,57 @@ function run(command, args, options = {}) {
   };
 }
 
-function cloneRepository(repoUrl) {
+function extractTarGz(bytes, destination) {
+  const tar = gunzipSync(bytes);
+  let offset = 0;
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const readString = (start, length) => header.subarray(start, start + length).toString("utf8").replace(/\0.*$/s, "");
+    const name = readString(0, 100);
+    const prefix = readString(345, 155);
+    const size = Number.parseInt(readString(124, 12).trim() || "0", 8);
+    const type = String.fromCharCode(header[156] || 48);
+    const archivePath = prefix ? `${prefix}/${name}` : name;
+    const relative = archivePath.split("/").slice(1).join("/");
+    if (relative && !relative.split("/").includes("..") && !relative.startsWith("/")) {
+      const target = normalize(join(destination, relative));
+      if (target.startsWith(normalize(destination + "/")) || target === normalize(destination)) {
+        if (type === "5") {
+          mkdirSync(target, { recursive: true });
+        } else if (type === "0" || type === "\0") {
+          mkdirSync(dirname(target), { recursive: true });
+          writeFileSync(target, tar.subarray(offset + 512, offset + 512 + size));
+        }
+      }
+    }
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+}
+
+async function cloneRepository(repoUrl) {
   const repo = parseRepo(repoUrl);
   const root = mkdtempSync(join(tmpdir(), "repo-rescue-node-"));
   const project = join(root, "project");
-  const clone = run("git", ["clone", "--depth", "1", "--filter=blob:none", "--no-tags", repo.url, project], { timeout: 45000 });
-  if (clone.exit_code !== 0) {
+  mkdirSync(project, { recursive: true });
+  try {
+    const headers = { "User-Agent": "repo-rescue-mcp", Accept: "application/vnd.github+json" };
+    const commitResponse = await fetch(`https://api.github.com/repos/${repo.slug}/commits/HEAD`, { headers });
+    if (!commitResponse.ok) throw new Error(`GitHub commit lookup failed with HTTP ${commitResponse.status}.`);
+    const commit = String((await commitResponse.json()).sha || "");
+    if (!/^[0-9a-f]{40}$/i.test(commit)) throw new Error("GitHub did not return a valid 40-character commit SHA.");
+    const archiveResponse = await fetch(`https://codeload.github.com/${repo.slug}/tar.gz/${commit}`, { headers });
+    if (!archiveResponse.ok) throw new Error(`GitHub archive download failed with HTTP ${archiveResponse.status}.`);
+    extractTarGz(Buffer.from(await archiveResponse.arrayBuffer()), project);
+    return { ...repo, root, project, commit };
+  } catch (error) {
     rmSync(root, { recursive: true, force: true });
-    throw new Error(`Clone failed with exit code ${clone.exit_code}: ${clone.stderr.slice(-1000)}`);
+    throw error;
   }
-  const commitRun = run("git", ["rev-parse", "HEAD"], { cwd: project, timeout: 5000 });
-  const commit = commitRun.stdout.trim();
-  if (!/^[0-9a-f]{40}$/i.test(commit)) throw new Error("Cloned repository did not expose a valid commit SHA.");
-  return { ...repo, root, project, commit };
 }
 
-function inspectProject(repoUrl) {
-  const snapshot = cloneRepository(repoUrl);
+async function inspectProject(repoUrl) {
+  const snapshot = await cloneRepository(repoUrl);
   try {
     let pyproject = "";
     try { pyproject = readFileSync(join(snapshot.project, "pyproject.toml"), "utf8"); } catch {}
@@ -113,8 +148,8 @@ function extractCounts(text) {
   return counts;
 }
 
-function reproduceProject(repoUrl) {
-  const snapshot = cloneRepository(repoUrl);
+async function reproduceProject(repoUrl) {
+  const snapshot = await cloneRepository(repoUrl);
   try {
     const pythonCandidates = process.platform === "win32" ? ["python"] : ["python3", "python"];
     let python = null;
@@ -169,7 +204,7 @@ function windowsProbe() {
   };
 }
 
-function callTool(name, args) {
+async function callTool(name, args) {
   if (name === "inspect_github_project") return inspectProject(args.repo_url);
   if (name === "reproduce_python_project") return reproduceProject(args.repo_url);
   if (name === "windows_environment_probe") return windowsProbe();
@@ -181,7 +216,7 @@ function send(message) {
 }
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-input.on("line", (line) => {
+input.on("line", async (line) => {
   if (!line.trim()) return;
   let request;
   try { request = JSON.parse(line); } catch { return; }
@@ -195,7 +230,7 @@ input.on("line", (line) => {
     } else if (request.method === "tools/list") {
       result = { tools };
     } else if (request.method === "tools/call") {
-      const value = callTool(request.params?.name, request.params?.arguments || {});
+      const value = await callTool(request.params?.name, request.params?.arguments || {});
       result = { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], isError: false };
     } else {
       send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: `Method not found: ${request.method}` } });
