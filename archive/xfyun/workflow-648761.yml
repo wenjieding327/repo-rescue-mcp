@@ -1,0 +1,255 @@
+flowMeta:
+  name: RepoRescue｜AI代码急救与项目复现
+  description: 代码看不懂、报错修不好，或整个 GitHub 项目跑不起来？直接粘贴代码、错误或仓库地址，RepoRescue 会主动解释、生成可复制的修复代码，并真实运行修改前后结果；从单段代码急救到科研项目复现，一个入口完成。
+  avatarIcon: https://openres.xfyun.cn/xfyundoc/2026-01-13/3d95929c-2ac2-45b9-9ca0-41734c005a55/1768290620182/3%402x.png
+  avatarColor: '#FFEAD5'
+  advancedConfig: '{"prologue":{"enabled":true,"inputExample":["请检查并真实复现这个公开项目：https://github.com/pallets/click
+    。必须给出 commit SHA、实际测试退出码和通过数量。","这是我的 Windows 11、Python 3.12 环境信息，请判断依赖冲突并给出可验证命令。",""]},"needGuide":false}'
+  category: 17
+  dslVersion: v1
+flowData:
+  nodes:
+  - id: node-start::d61b0f71-87ee-475e-93ba-f1607f0ce783
+    dragging: false
+    selected: false
+    width: 256
+    height: 74
+    position:
+      x: 60
+      y: 280
+    positionAbsolute:
+      x: 60
+      y: 280
+    type: 开始节点
+    data:
+      allowInputReference: false
+      allowOutputReference: true
+      label: 开始
+      status: ''
+      nodeMeta:
+        aliasName: 开始节点
+        nodeType: 基础节点
+      inputs: [
+        ]
+      outputs:
+      - id: 0918514b-72a8-4646-8dd9-ff4a8fc26d44
+        name: AGENT_USER_INPUT
+        nameErrMsg: ''
+        schema:
+          type: string
+          default: 用户本轮对话输入内容
+        required: true
+        deleteDisabled: true
+      nodeParam: {
+        }
+      icon: https://oss-beijing-m8.openstorage.cn/pro-bucket/sparkBot/common/workflow/icon/start-node-icon.png
+      description: 工作流的开启节点，用于接收用户问题、公开仓库链接或环境信息。
+      updatable: false
+  - id: agent::72607938-4b06-45a4-b996-823670f9cc01
+    dragging: false
+    selected: true
+    width: 319
+    height: 148
+    position:
+      x: 380
+      y: 260
+    positionAbsolute:
+      x: 380
+      y: 260
+    type: 智能体节点
+    data:
+      allowInputReference: true
+      allowOutputReference: true
+      label: RepoRescue 智能复现决策
+      references:
+      - children:
+        - references:
+          - originId: node-start::d61b0f71-87ee-475e-93ba-f1607f0ce783
+            id: 0918514b-72a8-4646-8dd9-ff4a8fc26d44
+            label: AGENT_USER_INPUT
+            type: string
+            value: AGENT_USER_INPUT
+            fileType: ''
+          label: ''
+          value: ''
+        label: 开始
+        parentNode: true
+        value: node-start::d61b0f71-87ee-475e-93ba-f1607f0ce783
+      status: ''
+      nodeMeta:
+        aliasName: 智能体节点
+        nodeType: Agent节点
+      inputs:
+      - id: agent::72607938-4b06-45a4-b996-823670f9cc01-in-1
+        name: input
+        nameErrMsg: ''
+        schema:
+          type: string
+          value:
+            type: ref
+            content:
+              name: AGENT_USER_INPUT
+              id: 0918514b-72a8-4646-8dd9-ff4a8fc26d44
+              nodeId: node-start::d61b0f71-87ee-475e-93ba-f1607f0ce783
+            contentErrMsg: ''
+        required: true
+        disabled: false
+      outputs:
+      - id: 42653c02-b9f3-412c-81a1-ce03bb7e7f01
+        name: REASONING_CONTENT
+        nameErrMsg: ''
+        schema:
+          type: string
+          default: 模型思考过程
+        customParameterType: deepseekr1
+      - id: d5adb00a-6600-4bd7-996d-cf0fe2916556
+        name: output
+        nameErrMsg: ''
+        schema:
+          type: string
+          description: 可追溯的科研代码复现证据报告
+          default: 面向普通用户的代码救援结果：通俗根因、可复制修复代码、修改前后验证证据及明确能力边界
+      nodeParam:
+        uid: '18882374495'
+        modelConfig:
+          domain: xdeepseekv3
+          api: wss://maas-api.cn-huabei-1.xf-yun.com/v1.1/chat
+          agentStrategy: 1
+        plugin:
+          workflowIds: [
+            ]
+          toolsList: [
+            ]
+          mcpServerUrls:
+          - https://xingchen-api.xf-yun.com/mcp/7485884555159117824/sse
+          mcpServerIds: [
+            ]
+          tools: [
+            ]
+          knowledge: [
+            ]
+        maxLoopCount: 10
+        instruction:
+          queryErrMsg: ''
+          answer: |-
+            你是 RepoRescue「可验证代码救援助手」。你的首要目标是让任何学生都能低门槛地获得能直接使用的代码：用户只需粘贴一段代码、一个报错、一道作业题、某个函数，或公开 GitHub 地址；不要要求用户先提取版本、依赖或专业字段。生成式能力是核心——你必须主动理解意图、用小白能听懂的话说明原因，并给出完整可复制的修复代码或最小 Diff，而不是只给排查清单。
+
+
+            按输入自动路由：
+            1）单段 Python 代码/报错：先指出最可能的根因，生成最小修复；随后必须调用 rescue_python_snippet，把用户原代码放入 original_code、修复代码放入 candidate_code，并根据题目示例构造 1—4 个明确用例。若工具返回 candidate_failed，读取错误继续修改并再次验证。用户未提供预期输出时可以只验证能否运行，但不得虚构题目要求。
+            2）从零写 Python 代码：直接生成完整代码；如适合安全运行，用相同代码作为 original_code 与 candidate_code 调用 rescue_python_snippet，只能表述为“候选代码已运行”，不能表述为“修复已验证”。
+            3）文件或 Notebook：先给结构和关键问题，再给最小修改；平台不能实际读取附件时要明确说明并请用户粘贴相关代码，不能声称已读取。
+            4）公开 GitHub 仓库：先调用 inspect_github_project；只有白名单仓库才能继续调用 reproduce_python_project。仓库测试通过只表述为“P3 指定测试范围通过”，不能声称官方 Demo 或论文指标已复现。
+            5）Windows 环境：仅在确实需要本机信息时提供 windows_environment_probe 的只读命令；不得声称自动读取用户电脑。
+
+
+            真实性规则：工具返回是执行事实来源，但你可以且必须生成、解释、改写代码。禁止伪造工具结果、退出码、通过数、commit 或日志；禁止为了通过而删除测试、弱化断言或硬编码答案。只有 original_code 在同一用例失败且 candidate_code 通过时，才写“已验证修复”。片段通过不等于文件、项目或论文复现成功。
+
+
+            回答先给普通人结果，再给代码：
+            结果：✅已验证修复 / ⚠️候选代码已运行 / ❌仍未通过 / 💡未执行建议
+            问题：一句话根因
+            修改：一句话改了什么
+            验证：修改前怎样失败 → 修改后通过几个用例
+            代码：完整可复制代码或紧凑 Diff
+            技术证据默认折叠在最后，仅列必要的错误、输出、测试范围和限制。不要让用户先读 backend、哈希或长日志才能知道问题是否解决。
+
+            技术证据只能直接转述 rescue_python_snippet 返回的 status、fix_verified、before.error_type、after.stdout 与用例数量；不要展示模型自行拼写的函数调用、参数对象或工具 JSON，也不要把 expected_stdout 改写成其他字段。若看不到工具原始返回，就降级为“未执行建议”而不是“已验证修复”。
+          reasoning: |-
+            1. 判断是从零写代码、片段急救、文件分析还是完整仓库；选择最低门槛路径，不让用户做可由模型或工具完成的信息提取。
+            2. 主动生成可直接使用的代码；修复任务坚持最小修改并保留用户接口。
+            3. 片段任务调用 rescue_python_snippet 做同用例前后验证；失败则根据实际错误迭代，最多在推理轮次内继续修复。
+            4. 仓库任务区分静态检查、依赖、指定测试、官方 Demo 和论文指标，不越级宣称。
+            5. 最终先用小白语言给结论和完整代码，再附简短证据与边界；绝不输出臆造的工具 JSON。
+          query: '{{input}}'
+        appId: 12a0a7e2
+        enableChatHistoryV2:
+          isEnabled: false
+          rounds: 1
+        serviceId: xdeepseekv3
+        llmId: 141
+        llmIdErrMsg: ''
+      icon: https://oss-beijing-m8.openstorage.cn/SparkBotProd/icon/common/agent.png
+      description: 使用 ReAct 策略自主调用 RepoRescue MCP，检查仓库并在受控环境执行真实测试。
+      updatable: false
+  - id: node-end::cda617af-551e-462e-b3b8-3bb9a041bf88
+    dragging: false
+    selected: false
+    width: 256
+    height: 74
+    position:
+      x: 760
+      y: 280
+    positionAbsolute:
+      x: 760
+      y: 280
+    type: 结束节点
+    data:
+      allowInputReference: true
+      allowOutputReference: false
+      label: 结束
+      references:
+      - children:
+        - references:
+          - originId: agent::72607938-4b06-45a4-b996-823670f9cc01
+            id: d5adb00a-6600-4bd7-996d-cf0fe2916556
+            label: output
+            type: string
+            value: output
+            fileType: ''
+          label: ''
+          value: ''
+        label: RepoRescue 智能复现决策
+        parentNode: true
+        value: agent::72607938-4b06-45a4-b996-823670f9cc01
+      status: ''
+      nodeMeta:
+        aliasName: 结束节点
+        nodeType: 基础节点
+      inputs:
+      - id: 82de2b42-a059-4c98-bffb-b6b4800fcac9
+        name: reproduction_evidence_report
+        nameErrMsg: ''
+        schema:
+          type: string
+          value:
+            type: ref
+            content:
+              name: output
+              id: d5adb00a-6600-4bd7-996d-cf0fe2916556
+              nodeId: agent::72607938-4b06-45a4-b996-823670f9cc01
+            contentErrMsg: ''
+        required: true
+        disabled: false
+      outputs: [
+        ]
+      nodeParam:
+        template: '{{reproduction_evidence_report}}'
+        streamOutput: true
+        templateErrMsg: ''
+        outputMode: 1
+      icon: https://oss-beijing-m8.openstorage.cn/pro-bucket/sparkBot/common/workflow/icon/end-node-icon.png
+      description: 输出可追溯复现证据报告。
+      updatable: false
+  edges:
+  - source: node-start::d61b0f71-87ee-475e-93ba-f1607f0ce783
+    sourceHandle: ''
+    target: agent::72607938-4b06-45a4-b996-823670f9cc01
+    type: customEdge
+    id: reactflow__edge-node-start::d61b0f71-87ee-475e-93ba-f1607f0ce783-agent::72607938-4b06-45a4-b996-823670f9cc01
+    markerEnd:
+      color: '#6356EA'
+      type: arrow
+    data:
+      edgeType: curve
+  - source: agent::72607938-4b06-45a4-b996-823670f9cc01
+    sourceHandle: ''
+    target: node-end::cda617af-551e-462e-b3b8-3bb9a041bf88
+    type: customEdge
+    id: reactflow__edge-agent::72607938-4b06-45a4-b996-823670f9cc01-node-end::cda617af-551e-462e-b3b8-3bb9a041bf88
+    markerEnd:
+      color: '#6356EA'
+      type: arrow
+    data:
+      edgeType: curve
+
