@@ -1,6 +1,21 @@
 # OpenClaw migration
 
-RepoRescue keeps its executable evidence layer in MCP so the agent shell can be replaced without rewriting the core.
+RepoRescue keeps generation policy in a Skill and executable evidence in MCP, so the agent shell can change without rewriting the core.
+
+## Hosted Node toolset
+
+Use the repository's `stdio-server.mjs` when the host provides Node.js. It exposes quick snippet rescue plus repository evidence tools:
+
+```text
+rescue_python_snippet
+inspect_github_project
+reproduce_python_project
+windows_environment_probe
+```
+
+## Python repository toolset
+
+For local container-backed repository reproduction:
 
 ```bash
 openclaw mcp add repo-rescue \
@@ -8,13 +23,12 @@ openclaw mcp add repo-rescue \
   --arg --from \
   --arg git+https://github.com/wenjieding327/repo-rescue-mcp@COMMIT_SHA \
   --arg repo-rescue-mcp \
-  --env REPO_RESCUE_ALLOWED_REPOS=pallets/click \
-  --env REPO_RESCUE_EXECUTION_BACKEND=direct
+  --env REPO_RESCUE_ALLOWED_REPOS=pallets/click
 
 openclaw mcp doctor repo-rescue --probe
 openclaw mcp tools repo-rescue --include 'inspect_github_project,reproduce_python_project,windows_environment_probe'
 ```
 
-The OpenClaw Skill should contain orchestration rules, refusal conditions, output format, and demo tasks. It must not contain hard-coded test results. A run may be called verified only when `reproduce_python_project` returns `verified=true` and an actual exit code.
+Install or copy [`skills/verified-code-rescue`](skills/verified-code-rescue) into the host's Skill directory. The Skill contains routing, iteration, evidence grades, refusal rules, and user-facing output. It contains no hard-coded test results.
 
-The dependency-free `stdio-server.mjs` launcher is for hosted MCP products that have `node`/`npx` but no `uvx`. The Python server remains the canonical local and OpenClaw implementation.
+A snippet fix may be called verified only when the original fails and the candidate passes the same stated case. A repository run may be called P3 only when `reproduce_python_project` returns an actual command, scope, and exit code. Neither result implies official-demo or paper-metric reproduction.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verified Code Rescue"
+  short_description: "Run, repair, and prove code fixes"
+  default_prompt: "Use $verified-code-rescue to repair this code and verify the fix with before-and-after execution evidence."
