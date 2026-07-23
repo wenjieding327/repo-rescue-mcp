@@ -213,14 +213,12 @@ async function reproduceWithPyodide(snapshot) {
     };
   }
   pyodideLog.length = 0;
-  try {
-    runtime.mountNodeFS("/project", snapshot.project);
-  } catch (error) {
-    if (!String(error?.message || error).includes("already mounted")) throw error;
-  }
   const started = Date.now();
   let exitCode = null;
+  let mounted = false;
   try {
+    runtime.mountNodeFS("/project", snapshot.project);
+    mounted = true;
     exitCode = Number(await runtime.runPythonAsync(`
 import os, sys, pytest
 os.chdir('/project')
@@ -230,6 +228,19 @@ int(result)
 `));
   } catch (error) {
     pyodideLog.push(String(error?.message || error));
+  } finally {
+    // The Pyodide runtime is reused across MCP calls. Always leave its current
+    // directory outside the NodeFS mount, remove stale import paths, and
+    // unmount before the temporary checkout is deleted by reproduceProject().
+    try {
+      await runtime.runPythonAsync(`
+import os, sys
+os.chdir('/')
+sys.path[:] = [p for p in sys.path if not p.startswith('/project')]
+`);
+    } finally {
+      if (mounted) runtime.FS.unmount("/project");
+    }
   }
   const output = pyodideLog.join("\n");
   return {
