@@ -24,7 +24,7 @@ const ALLOWED_REPOS = new Set(
     .filter(Boolean),
 );
 
-const SERVER_BUILD = "repo-rescue-verified-code-20260723-v2";
+const SERVER_BUILD = "repo-rescue-verified-code-20260723-v3";
 const ATTESTATION_SALT = "RR::portable-evidence::v1::9d2c71";
 const MAX_SNIPPET_CHARS = 12_000;
 const MAX_SNIPPET_CASES = 4;
@@ -49,6 +49,7 @@ function withAttestation(result) {
 
 const pyodideLog = [];
 let pyodideRuntimePromise;
+let pytestRuntimePromise;
 let pyodideQueue = Promise.resolve();
 
 function withPyodideLock(task) {
@@ -60,18 +61,23 @@ function withPyodideLock(task) {
 function getPyodideRuntime() {
   pyodideRuntimePromise ||= import("pyodide")
     .then(async ({ loadPyodide }) => {
-      const runtime = await loadPyodide({
+      return loadPyodide({
         stdout: (text) => pyodideLog.push(String(text)),
         stderr: (text) => pyodideLog.push(String(text)),
       });
-      await runtime.loadPackage("pytest", {
-        messageCallback: (text) => pyodideLog.push(String(text)),
-        errorCallback: (text) => pyodideLog.push(String(text)),
-      });
-      return runtime;
     })
     .catch((error) => ({ startupError: String(error?.message || error) }));
   return pyodideRuntimePromise;
+}
+
+function ensurePytestRuntime(runtime) {
+  pytestRuntimePromise ||= runtime.loadPackage("pytest", {
+        messageCallback: (text) => pyodideLog.push(String(text)),
+        errorCallback: (text) => pyodideLog.push(String(text)),
+    })
+    .then(() => runtime)
+    .catch((error) => ({ startupError: String(error?.message || error) }));
+  return pytestRuntimePromise;
 }
 
 const tools = [
@@ -375,10 +381,23 @@ async function rescuePythonSnippet(args) {
 }
 
 async function reproduceWithPyodide(snapshot) {
-  const runtime = await getPyodideRuntime();
+  let runtime = await getPyodideRuntime();
   if (runtime.startupError) {
     return {
       status: "pyodide_unavailable",
+      verified: false,
+      repository: snapshot.slug,
+      commit_sha: snapshot.commit,
+      backend: "pyodide_wasm_allowlist",
+      exit_code: null,
+      counts: null,
+      error: runtime.startupError,
+    };
+  }
+  runtime = await ensurePytestRuntime(runtime);
+  if (runtime.startupError) {
+    return {
+      status: "pytest_runtime_unavailable",
       verified: false,
       repository: snapshot.slug,
       commit_sha: snapshot.commit,
