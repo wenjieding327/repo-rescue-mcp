@@ -14,7 +14,7 @@ The product serves beginners through one low-friction entry point while keeping 
 |---|---|---|
 | Quick code rescue | A snippet, function, error, or assignment | Plain-language cause, repaired code, before/after run evidence |
 | File rescue | A Python file or notebook | Structure, focused patch, tests, readable result |
-| Project rescue | A public GitHub repository | Commit-pinned inspection, constrained execution, test evidence, reproduction boundary |
+| Project rescue | A public GitHub repository and optional issue description | Commit-pinned failure, generated source repair, same-command verification, patch and evidence bundle |
 
 ## Why it is different
 
@@ -24,26 +24,43 @@ The product serves beginners through one low-friction entry point while keeping 
 - **Scoped claims:** snippet execution, repository tests, official demos, and paper metrics are different evidence levels.
 - **Portable core:** the same MCP tools can power XFYun Agent, OpenClaw, Codex, or another agent shell.
 
-## Live competition architecture
+## Backend repair architecture
 
 ```text
-User code / error / GitHub URL
-              │
-              ▼
-     Generative agent decision
-       ├─ explain and repair
-       └─ select verification path
-              │
-              ▼
-        RepoRescue MCP tools
-       ├─ rescue_python_snippet
-       ├─ inspect_github_project
-       ├─ reproduce_python_project
-       └─ windows_environment_probe
-              │
-              ▼
-  readable result + diff + scoped evidence
+GitHub URL + issue
+        │
+        ▼
+commit-pinned temporary checkout
+        │
+        ▼
+Docker baseline verifier ── records failing command, exit code and logs
+        │
+        ▼
+OpenAI Repair Agent ── proposes bounded non-test source replacements
+        │
+        ▼
+safe patch application ── blocks traversal, test edits and Git metadata
+        │
+        ▼
+same-command verifier ── retries up to the configured attempt limit
+        │
+        ▼
+repair.patch + evidence.json + report.md
 ```
+
+## Interview demo — one command, no API key
+
+From PowerShell in the repository root:
+
+```powershell
+.\demo.ps1
+```
+
+On Windows, `demo.cmd` can also be double-clicked.
+
+The script creates or reuses `.venv`, installs the project, and runs a seeded broken calculator through the real orchestration path. The original test exits `1`, the Repair Agent changes `calculator.py`, the exact same command exits `0`, and a timestamped evidence bundle is written under `artifacts/`.
+
+This deterministic demo is intentionally limited to the bundled trusted project so it is reliable without Docker, network access, or model credentials. Public GitHub repositories use the Docker + OpenAI path below.
 
 ## Quick start: hosted Node MCP
 
@@ -71,21 +88,27 @@ Supply original code and the AI-generated candidate. Optional cases provide stdi
 
 The response records the original `IndexError`, the repaired output, case-level status, and a scoped `S2`/`L1_SNIPPET_EXECUTION` result. It never claims a whole project or paper was reproduced from this snippet run.
 
-## Local Python MCP
+## Full repository Repair Agent
 
-The Python server provides repository inspection and container-backed reproduction:
+The Python backend provides repository inspection, container-backed reproduction, repository repair orchestration, verification and artifact output:
 
 ```powershell
 py -3.11 -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"
-.venv\Scripts\pytest
+.venv\Scripts\python -m pip install -e ".[dev,agent]"
+.venv\Scripts\python -m pytest
 docker build -f sandbox/Dockerfile.python311 -t repo-rescue-python:3.11 .
 
-$env:REPO_RESCUE_ALLOWED_REPOS="pallets/click"
-.venv\Scripts\repo-rescue-mcp
+$env:OPENAI_API_KEY="your-api-key"
+$env:REPO_RESCUE_ALLOWED_REPOS="owner/broken-repository"
+.venv\Scripts\repo-rescue repair `
+  https://github.com/owner/broken-repository `
+  --issue "describe the observed failure" `
+  --artifacts .\artifacts
 ```
 
-The Streamable HTTP endpoint defaults to `http://localhost:8000/mcp`. Set `REPO_RESCUE_TRANSPORT=stdio` for a command-based host.
+The repair command uses the [OpenAI Responses API](https://developers.openai.com/api/docs/guides/latest-model). `REPO_RESCUE_OPENAI_MODEL` selects the model and defaults to `gpt-5.6-terra`. The repository must be public and explicitly allow-listed; arbitrary shell commands are never accepted.
+
+To expose the same workflow as MCP, run `.venv\Scripts\repo-rescue-mcp`. The Streamable HTTP endpoint defaults to `http://localhost:8000/mcp`; set `REPO_RESCUE_TRANSPORT=stdio` for a command-based host.
 
 ## Repository tools
 
@@ -96,6 +119,14 @@ Read-only inspection of an allow-listed public repository. Returns the exact com
 ### `reproduce_python_project`
 
 Runs a fixed verification scope for an explicitly allow-listed Python repository and returns the actual command, exit code, duration, test counts, bounded logs, backend, and attestation. The result states whether it was a smoke test, selected suite, or broader run.
+
+### `repair_github_project`
+
+Runs the full repository loop: commit-pinned clone, Docker baseline, bounded Repair Agent proposal, protected source replacement, identical-command verification, retry, and durable evidence artifacts. It never pushes or opens a pull request.
+
+### `run_interview_demo`
+
+Runs the deterministic end-to-end demonstration through MCP without Docker or an API key. This is the safest live interview entry point.
 
 ### `windows_environment_probe`
 
@@ -123,17 +154,19 @@ This Skill is intentionally not a generic coding prompt. Its reusable value is t
 
 - Snippet rescue limits source size and case count, permits only a small safe standard-library import set, rejects filesystem/process/network capabilities, and applies a deterministic execution budget.
 - Repository execution remains allow-listed and constrained.
+- Model output can replace only existing bounded source/config files; test edits, path traversal, symlinks and Git metadata are rejected.
+- A repair is verified only when the pinned original fails and the modified checkout passes the exact same recorded command.
 - The service does not read a user's computer, accept arbitrary shell commands, or execute private repositories.
 - Public production should move untrusted repositories to gVisor or Firecracker, authenticate and rate-limit callers, scan archives, restrict outbound installation traffic, and expire stored source and logs.
 
 ## Portfolio summary
 
-> Built a portable MCP-backed code rescue agent that combines generative debugging with constrained before/after execution, evidence-level grading, commit-pinned repository inspection, and verifiable test reports. Integrated the same tool layer with XFYun Agent and an agent-host Skill while preventing unexecuted AI suggestions from being presented as verified fixes.
+> Built a backend Repair Agent that accepts a public GitHub repository, creates a commit-pinned isolated checkout, reproduces a real failure, generates and safely applies a bounded source repair, reruns the exact same verifier, and emits a patch plus machine-readable and human-readable evidence. Exposed the loop through CLI and MCP while preventing test tampering and unverified success claims.
 
 ## Roadmap
 
 - File and notebook upload with focused test generation.
 - Dependency-conflict rescue with lockfile output.
-- Patch application and rerun loop for repositories.
-- Official-demo (`P4`) case and downloadable reproduction report.
+- Web job dashboard and downloadable artifact bundle.
+- Official-demo (`P4`) benchmark cases beyond the bundled interview fixture.
 - Optional GitHub Issue/PR output after explicit user confirmation.

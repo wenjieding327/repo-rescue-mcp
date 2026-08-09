@@ -1,5 +1,6 @@
 .env
 .pytest_cache/
+.coverage
 .venv/
 node_modules/
 __pycache__/
@@ -7,3 +8,4 @@ __pycache__/
 *.py[cod]
 build/
 dist/
+artifacts/

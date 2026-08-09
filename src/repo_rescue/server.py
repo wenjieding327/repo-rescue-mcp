@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .analysis import analyze_snapshot
+from .orchestrator import run_builtin_demo, run_github_repair
 from .repository import clone_public_repository
 from .runner import reproduce
 from .security import SecurityError
@@ -59,6 +61,52 @@ def reproduce_python_project(repo_url: str) -> dict[str, Any]:
             result = reproduce(snapshot, inspection)
             return {"ok": True, "inspection": inspection, "reproduction": result, "executed": True}
     except (SecurityError, OSError, TimeoutError, subprocess.SubprocessError) as exc:  # type: ignore[name-defined]
+        return _error(exc)
+
+
+@mcp.tool()
+def repair_github_project(
+    repo_url: str,
+    issue: str = "",
+    max_attempts: int = 2,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Run the repository-level repair loop and persist patch evidence.
+
+    The original public repository is commit-pinned and never modified remotely.
+    Its failing verification command is recorded, an OpenAI Repair Agent may
+    replace bounded non-test source files, and the exact same command is rerun.
+    A repair is verified only when the original fails and the patched checkout
+    passes. Docker execution and REPO_RESCUE_ALLOWED_REPOS are required.
+    """
+    try:
+        artifacts = Path(os.getenv("REPO_RESCUE_ARTIFACTS_DIR", "artifacts"))
+        return {
+            "ok": True,
+            "repair": run_github_repair(
+                repo_url,
+                issue=issue,
+                artifacts_root=artifacts,
+                max_attempts=max_attempts,
+                model=model,
+            ),
+        }
+    except (SecurityError, OSError, TimeoutError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+def run_interview_demo() -> dict[str, Any]:
+    """Run a deterministic end-to-end repair demo without Docker or an API key.
+
+    The bundled trusted project fails in a newly created virtual environment,
+    receives a real source edit, passes the exact same test command, and emits
+    repair.patch, evidence.json, and report.md.
+    """
+    try:
+        artifacts = Path(os.getenv("REPO_RESCUE_ARTIFACTS_DIR", "artifacts"))
+        return {"ok": True, "repair": run_builtin_demo(artifacts_root=artifacts)}
+    except (SecurityError, OSError, TimeoutError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         return _error(exc)
 
 

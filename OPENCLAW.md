@@ -13,6 +13,8 @@ reproduce_python_project
 windows_environment_probe
 ```
 
+The Node launcher is the portable verification-only surface. Use the Python MCP below for the complete repository Repair Agent loop.
+
 ## Python repository toolset
 
 For local container-backed repository reproduction:
@@ -26,8 +28,10 @@ openclaw mcp add repo-rescue \
   --env REPO_RESCUE_ALLOWED_REPOS=pallets/click
 
 openclaw mcp doctor repo-rescue --probe
-openclaw mcp tools repo-rescue --include 'inspect_github_project,reproduce_python_project,windows_environment_probe'
+openclaw mcp tools repo-rescue --include 'inspect_github_project,reproduce_python_project,repair_github_project,run_interview_demo,windows_environment_probe'
 ```
+
+The Python server also exposes `repair_github_project` and `run_interview_demo`. Real repository repair requires the optional `agent` dependency, `OPENAI_API_KEY`, an allow-listed public repository, and the Docker execution image. The interview demo needs none of those external services.
 
 Install or copy [`skills/verified-code-rescue`](skills/verified-code-rescue) into the host's Skill directory. The Skill contains routing, iteration, evidence grades, refusal rules, and user-facing output. It contains no hard-coded test results.
 

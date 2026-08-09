@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repo-rescue-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-first repository inspection and sandboxed reproduction MCP server for RepoRescue."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,9 +20,13 @@ dev = [
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
 ]
+agent = [
+  "openai>=2.0,<3",
+]
 
 [project.scripts]
 repo-rescue-mcp = "repo_rescue.server:main"
+repo-rescue = "repo_rescue.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/repo_rescue"]

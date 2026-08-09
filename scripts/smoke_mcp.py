@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -22,6 +23,10 @@ async def exercise_server() -> None:
             )
             print(f"CALL_ERROR={result.isError}")
             print("CONTENT_TYPES=" + ",".join(item.type for item in result.content))
+            demo = await session.call_tool("run_interview_demo", {})
+            payload = json.loads(demo.content[0].text)
+            print(f"DEMO_STATUS={payload['repair']['status']}")
+            print(f"DEMO_PATCH={payload['repair']['artifacts']['patch']}")
 
 
 def main() -> None:
