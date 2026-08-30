@@ -16,6 +16,8 @@ def test_normalizes_public_github_url() -> None:
         "https://gitlab.com/pallets/click",
         "https://github.com/pallets/click/issues",
         "https://token@github.com/pallets/click",
+        "https://github.com/pallets/click?tab=readme",
+        "https://github.com/pallets/click#readme",
     ],
 )
 def test_rejects_unsafe_repository_urls(value: str) -> None:
@@ -25,4 +27,3 @@ def test_rejects_unsafe_repository_urls(value: str) -> None:
 
 def test_redacts_common_secret_assignments() -> None:
     assert "super-secret" not in redact("api_key=super-secret")
-

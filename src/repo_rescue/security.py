@@ -26,6 +26,8 @@ def normalize_github_url(value: str) -> tuple[str, str]:
         raise SecurityError("Only public https://github.com repositories are supported.")
     if parsed.username or parsed.password or parsed.port:
         raise SecurityError("Credentials and custom ports are not allowed in repository URLs.")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise SecurityError("Repository URLs may not contain parameters, queries, or fragments.")
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) != 2:
         raise SecurityError("Repository URL must be exactly https://github.com/owner/repository.")
@@ -52,14 +54,33 @@ def require_execution_allowed(slug: str) -> None:
 
 
 def safe_child(root: Path, relative: str) -> Path:
-    target = (root / relative).resolve()
     root_resolved = root.resolve()
+    candidate = Path(relative)
+    if candidate.is_absolute() or candidate.anchor or candidate.drive:
+        raise SecurityError("Absolute paths are not allowed.")
+
+    # Check the unresolved path one component at a time. Resolving first would
+    # hide a repository symlink such as src/fix.py -> tests/helper.py and let a
+    # non-test alias cross the test-edit boundary.
+    target = root_resolved
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise SecurityError("Path traversal is not allowed.")
+        target = target / part
+        if target.is_symlink():
+            raise SecurityError("Symbolic links are not allowed in repair paths.")
+
+    target = target.resolve()
     if root_resolved != target and root_resolved not in target.parents:
         raise SecurityError("Path traversal is not allowed.")
     return target
 
 
-def redact(text: str, limit: int = 65_536) -> str:
+def redact(text: str | bytes, limit: int = 65_536) -> str:
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
     bounded = text[:limit]
     for pattern in _SECRET_PATTERNS:
         bounded = pattern.sub(lambda match: f"{match.group(1)}=[REDACTED]" if match.lastindex else "[REDACTED]", bounded)
@@ -67,3 +88,13 @@ def redact(text: str, limit: int = 65_536) -> str:
         bounded += f"\n[output truncated after {limit} characters]"
     return bounded
 
+
+def redact_paths(text: str | bytes, replacements: list[tuple[Path, str]], limit: int = 65_536) -> str:
+    bounded = redact(text, limit=limit)
+    for path, label in replacements:
+        raw = str(path)
+        variants = {raw, raw.replace("\\", "/"), raw.replace("/", "\\")}
+        for variant in sorted(variants, key=len, reverse=True):
+            if variant:
+                bounded = bounded.replace(variant, label)
+    return bounded

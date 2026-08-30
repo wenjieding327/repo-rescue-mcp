@@ -15,6 +15,10 @@ from .security import safe_child
 
 MANIFESTS = (
     "pyproject.toml",
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
     "requirements.txt",
     "requirements-dev.txt",
     "setup.cfg",
@@ -24,6 +28,59 @@ MANIFESTS = (
     "runtime.txt",
     ".python-version",
 )
+
+PYTEST_CONFIG_NAMES = {
+    ".pytest.ini",
+    ".pytest.toml",
+    "conftest.py",
+    "pytest.ini",
+    "pytest.toml",
+    "tox.ini",
+}
+
+_PYTEST_DECLARATION = re.compile(
+    r"(?m)^\s*(?:(?:async\s+)?def\s+test_[A-Za-z0-9_]*\s*\(|class\s+Test[A-Za-z0-9_]*\b)"
+)
+
+
+def _requirements_manifests(files: set[str]) -> list[str]:
+    discovered = {
+        name
+        for name in files
+        if Path(name).name.lower().startswith("requirements") and name.lower().endswith(".txt")
+    }
+    ordered: list[str] = []
+    for name in (*MANIFESTS, *sorted(discovered)):
+        if name in files and name not in ordered:
+            ordered.append(name)
+    return ordered
+
+
+def _is_execution_requirements_manifest(relative: str) -> bool:
+    path = Path(relative)
+    if len(path.parts) == 1:
+        return path.name.lower() in {
+            "requirements.txt",
+            "requirements-dev.txt",
+            "requirements-test.txt",
+            "requirements-tests.txt",
+        }
+    return any(part.lower() in {"test", "tests"} for part in path.parts[:-1])
+
+
+def _is_test_file(relative: str) -> bool:
+    path = Path(relative)
+    if path.suffix.lower() != ".py":
+        return False
+    parts = {part.lower() for part in path.parts[:-1]}
+    name = path.name.lower()
+    named_test_tree = any(
+        part in {"test", "tests", "testing", "spec", "specs"}
+        or part.startswith(("test_", "tests_"))
+        or part.endswith(("_test", "_tests"))
+        for part in parts
+    )
+    return bool(named_test_tree or name.startswith("test_") or name.endswith("_test.py"))
 
 
 def _read_text(root: Path, relative: str, limit: int = 131_072) -> str | None:
@@ -65,11 +122,20 @@ def _pyproject(text: str) -> dict[str, Any]:
     optional = project.get("optional-dependencies", {})
     dependency_groups = data.get("dependency-groups", {})
     build = data.get("build-system", {}) if isinstance(data.get("build-system", {}), dict) else {}
+    tool = data.get("tool", {}) if isinstance(data.get("tool", {}), dict) else {}
     test_dependencies: list[str] = []
+    if isinstance(optional, dict):
+        selected_extra = next(
+            (group_name for group_name in ("test", "tests") if isinstance(optional.get(group_name), list)),
+            None,
+        )
+        if selected_extra:
+            group = optional[selected_extra]
+            test_dependencies.extend(str(item) for item in group if isinstance(item, str))
     if isinstance(dependency_groups, dict):
         selected_group = next(
             (group_name for group_name in ("test", "tests") if isinstance(dependency_groups.get(group_name), list)),
-            "dev" if isinstance(dependency_groups.get("dev"), list) else None,
+            None,
         )
         if selected_group:
             group = dependency_groups[selected_group]
@@ -82,6 +148,7 @@ def _pyproject(text: str) -> dict[str, Any]:
         "dependency_groups": sorted(dependency_groups) if isinstance(dependency_groups, dict) else [],
         "test_dependencies": test_dependencies,
         "build_backend": build.get("build-backend"),
+        "pytest_configured": isinstance(tool.get("pytest"), dict),
     }
 
 
@@ -94,7 +161,12 @@ def _setup_cfg(text: str) -> dict[str, Any]:
     requires_python = parser.get("options", "python_requires", fallback=None)
     raw_dependencies = parser.get("options", "install_requires", fallback="")
     dependencies, rejected = _requirement_lines(raw_dependencies)
-    return {"requires_python": requires_python, "dependencies": dependencies, "rejected_dependencies": rejected}
+    return {
+        "requires_python": requires_python,
+        "dependencies": dependencies,
+        "rejected_dependencies": rejected,
+        "pytest_configured": parser.has_section("tool:pytest") or parser.has_section("pytest"),
+    }
 
 
 def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
@@ -107,7 +179,7 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
     python_hints: list[dict[str, str]] = []
     evidence: list[dict[str, str]] = []
 
-    for manifest in MANIFESTS:
+    for manifest in _requirements_manifests(file_set):
         if manifest not in file_set:
             continue
         text = _read_text(root, manifest)
@@ -115,11 +187,18 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
             manifests[manifest] = {"status": "unreadable_or_too_large"}
             continue
         evidence.append({"source": manifest, "fact": "manifest_present"})
-        if manifest.startswith("requirements"):
+        if Path(manifest).name.lower().startswith("requirements"):
             accepted, rejected = _requirement_lines(text)
-            declared_dependencies.extend(accepted)
+            selected_for_execution = _is_execution_requirements_manifest(manifest)
+            if selected_for_execution:
+                declared_dependencies.extend(accepted)
+                execution_dependencies.extend(accepted)
             rejected_dependencies.extend({"source": manifest, "value": item} for item in rejected)
-            manifests[manifest] = {"dependencies": accepted, "rejected": rejected}
+            manifests[manifest] = {
+                "dependencies": accepted,
+                "rejected": rejected,
+                "selected_for_execution": selected_for_execution,
+            }
         elif manifest == "pyproject.toml":
             parsed = _pyproject(text)
             manifests[manifest] = parsed
@@ -142,7 +221,12 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
         else:
             manifests[manifest] = {"status": "present", "preview": text[:300]}
 
-    test_files = [name for name in snapshot.files if name.startswith("tests/") and name.endswith(".py")]
+    test_files = [name for name in snapshot.files if _is_test_file(name)]
+    static_test_module_count = sum(
+        1
+        for name in test_files
+        if _PYTEST_DECLARATION.search(_read_text(root, name) or "")
+    )
     python_paths = ["."]
     if any(name.startswith("src/") and name.endswith(".py") for name in snapshot.files):
         python_paths.append("src")
@@ -152,7 +236,15 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
         if name in file_set
     ]
     suggested_commands: list[str] = []
-    if test_files or "pytest.ini" in file_set or "conftest.py" in file_set:
+    pytest_configuration_files = sorted(
+        name for name in file_set if Path(name).name.lower() in PYTEST_CONFIG_NAMES
+    )
+    pytest_configured = bool(
+        pytest_configuration_files
+        or manifests.get("pyproject.toml", {}).get("pytest_configured")
+        or manifests.get("setup.cfg", {}).get("pytest_configured")
+    )
+    if test_files or pytest_configured:
         suggested_commands.append("python -m pytest -q")
     if "main.py" in likely_entries:
         suggested_commands.append("python main.py --help")
@@ -190,6 +282,8 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
         "python_version_hints": python_hints,
         "likely_entrypoints": likely_entries,
         "test_file_count": len(test_files),
+        "static_test_module_count": static_test_module_count,
+        "pytest_configuration_files": pytest_configuration_files,
         "python_paths": python_paths,
         "suggested_verification_commands": suggested_commands,
         "risks": risks,

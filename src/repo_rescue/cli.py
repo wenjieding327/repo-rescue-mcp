@@ -7,22 +7,32 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .analysis import analyze_snapshot
 from .orchestrator import run_builtin_demo, run_github_repair
+from .repository import clone_public_repository
 
 
 def _print_result(report: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return
-    baseline = report.get("baseline", {}).get("execution", {})
-    final = report.get("final_verification", {}).get("execution", {})
+    baseline = report.get("baseline", {})
+    final = report.get("final_verification", {})
+
+    def exit_code(verification: dict[str, Any]) -> Any:
+        execution = verification.get("execution")
+        if isinstance(execution, dict) and execution.get("exit_code") is not None:
+            return execution.get("exit_code")
+        install = verification.get("install")
+        return install.get("exit_code") if isinstance(install, dict) else None
+
     print("RepoRescue automatic repair loop")
     print(f"result: {report.get('status')}")
     print(f"repository: {report.get('repository', {}).get('slug')}")
     print(f"commit: {report.get('repository', {}).get('commit')}")
-    print(f"command: {report.get('baseline', {}).get('command')}")
-    print(f"before: exit {baseline.get('exit_code')}")
-    print(f"after:  exit {final.get('exit_code')}")
+    print(f"command: {baseline.get('command')}")
+    print(f"before: exit {exit_code(baseline)}")
+    print(f"after:  exit {exit_code(final)}")
     print(f"changed: {', '.join(report.get('changed_files', [])) or 'none'}")
     print(f"patch: {report.get('artifacts', {}).get('patch')}")
     print(f"report: {report.get('artifacts', {}).get('report')}")
@@ -31,6 +41,25 @@ def _print_result(report: dict[str, Any], *, as_json: bool) -> None:
 
 def _artifacts_path(value: str) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def _print_inspection(inspection: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(inspection, ensure_ascii=False, indent=2))
+        return
+    repository = inspection.get("repository", {})
+    print("RepoRescue read-only inspection")
+    print(f"repository: {repository.get('slug')}")
+    print(f"commit: {repository.get('commit')}")
+    print(f"language: {inspection.get('detected_language')}")
+    print(f"manifests: {', '.join(inspection.get('manifests', {}).keys()) or 'none'}")
+    print(f"suggested command: {(inspection.get('suggested_verification_commands') or [None])[0]}")
+
+
+def _report_exit_code(report: dict[str, Any]) -> int:
+    if report.get("verified_repair") or report.get("status") == "already_passing":
+        return 0
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
     demo = subparsers.add_parser("demo", help="Run the deterministic, no-API-key interview demo.")
     demo.add_argument("--artifacts", default="artifacts", type=_artifacts_path)
     demo.add_argument("--json", action="store_true", dest="as_json")
+
+    inspect = subparsers.add_parser("inspect", help="Inspect a public GitHub repository without executing it.")
+    inspect.add_argument("repo_url")
+    inspect.add_argument("--json", action="store_true", dest="as_json")
 
     repair = subparsers.add_parser("repair", help="Repair an allow-listed public GitHub repository.")
     repair.add_argument("repo_url")
@@ -64,6 +97,11 @@ def main(argv: list[str] | None = None) -> None:
         server_main()
         return
     try:
+        if args.command == "inspect":
+            with clone_public_repository(args.repo_url) as snapshot:
+                inspection = analyze_snapshot(snapshot)
+            _print_inspection(inspection, as_json=args.as_json)
+            raise SystemExit(0)
         if args.command == "demo":
             report = run_builtin_demo(artifacts_root=args.artifacts)
         else:
@@ -78,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"RepoRescue failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
     _print_result(report, as_json=args.as_json)
-    raise SystemExit(0 if report.get("verified_repair") else 1)
+    raise SystemExit(_report_exit_code(report))
 
 
 if __name__ == "__main__":

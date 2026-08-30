@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from .repository import RepositorySnapshot
 from .runner import reproduce
-from .security import redact
+from .security import redact_paths
 
 
 class Verifier(Protocol):
@@ -26,14 +26,15 @@ class DockerRepositoryVerifier:
 
     def verify(self, snapshot: RepositorySnapshot, analysis: dict[str, Any]) -> dict[str, Any]:
         result = reproduce(snapshot, analysis)
-        execution = result.get("execution") if isinstance(result.get("execution"), dict) else {}
         return {
             "status": result.get("status"),
             "verified": bool(result.get("verified")),
             "backend": result.get("backend", "docker"),
             "command": result.get("verification_command"),
             "install": result.get("install"),
-            "execution": execution,
+            "execution": result.get("execution"),
+            "verification_scope": result.get("verification_scope"),
+            "repair_evidence_eligible": result.get("repair_evidence_eligible"),
             "evidence_note": result.get("evidence_note"),
         }
 
@@ -90,8 +91,14 @@ class EphemeralVenvVerifier:
                 "exit_code": result.returncode,
                 "timed_out": False,
                 "duration_seconds": round(time.monotonic() - started, 3),
-                "stdout": redact(result.stdout or ""),
-                "stderr": redact(result.stderr or ""),
+                "stdout": redact_paths(
+                    result.stdout or "",
+                    [(snapshot.path, "<repository>"), (self.environment_root, "<environment>")],
+                ),
+                "stderr": redact_paths(
+                    result.stderr or "",
+                    [(snapshot.path, "<repository>"), (self.environment_root, "<environment>")],
+                ),
             }
         except subprocess.TimeoutExpired as exc:
             execution = {
@@ -99,8 +106,14 @@ class EphemeralVenvVerifier:
                 "exit_code": None,
                 "timed_out": True,
                 "duration_seconds": round(time.monotonic() - started, 3),
-                "stdout": redact(exc.stdout or ""),
-                "stderr": redact(exc.stderr or ""),
+                "stdout": redact_paths(
+                    exc.stdout or "",
+                    [(snapshot.path, "<repository>"), (self.environment_root, "<environment>")],
+                ),
+                "stderr": redact_paths(
+                    exc.stderr or "",
+                    [(snapshot.path, "<repository>"), (self.environment_root, "<environment>")],
+                ),
             }
         verified = execution["exit_code"] == 0 and not execution["timed_out"]
         return {

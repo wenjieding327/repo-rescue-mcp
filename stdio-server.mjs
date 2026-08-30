@@ -4,13 +4,12 @@ import { createInterface } from "node:readline";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
-import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { gunzipSync } from "node:zlib";
-import { createHash } from "node:crypto";
 
-// MCP stdio reserves stdout exclusively for JSON-RPC. Third-party runtimes
-// (notably Pyodide package loading) may log through console, so keep every
-// incidental message on stderr and write protocol messages explicitly below.
+// MCP stdio reserves stdout exclusively for JSON-RPC. Keep every incidental
+// message off that channel and write protocol messages explicitly below.
 const protocolWrite = process.stdout.write.bind(process.stdout);
 process.stdout.write = () => true;
 for (const level of ["log", "info", "warn", "debug", "error"]) {
@@ -24,66 +23,42 @@ const ALLOWED_REPOS = new Set(
     .filter(Boolean),
 );
 
-const SERVER_BUILD = "repo-rescue-verified-code-20260723-v3";
-const ATTESTATION_SALT = "RR::portable-evidence::v1::9d2c71";
 const MAX_SNIPPET_CHARS = 12_000;
 const MAX_SNIPPET_CASES = 4;
+const MAX_SNIPPET_STDOUT_CHARS = 6_000;
+const MAX_SNIPPET_STDERR_CHARS = 3_000;
+const MAX_WORKER_PROTOCOL_BYTES = 1024 * 1024;
+const MAX_WORKER_STDERR_BYTES = 32 * 1024;
+const SNIPPET_WORKER_PATH = fileURLToPath(new URL("./snippet-worker.mjs", import.meta.url));
+const configuredWorkerTimeout = Number.parseInt(process.env.REPO_RESCUE_SNIPPET_WORKER_TIMEOUT_MS || "6000", 10);
+const SNIPPET_WORKER_TIMEOUT_MS = Number.isFinite(configuredWorkerTimeout)
+  ? Math.min(15_000, Math.max(500, configuredWorkerTimeout))
+  : 6_000;
 
-function withAttestation(result) {
-  const payload = [
-    SERVER_BUILD,
-    result.commit_sha ?? "null",
-    result.backend ?? "null",
-    result.verification_command ?? "null",
-    String(result.exit_code ?? "null"),
-    String(result.counts?.passed ?? 0),
-    String(result.duration_seconds ?? "null"),
-  ].join("|");
-  return {
-    ...result,
-    server_build: SERVER_BUILD,
-    attestation_payload: payload,
-    attestation_sha256: createHash("sha256").update(`${ATTESTATION_SALT}|${payload}`).digest("hex"),
-  };
-}
+// Profiles are used only for read-only repository inspection in this Node
+// launcher. Repository execution is exclusively owned by the Python MCP
+// backend, where Docker isolation and the full verifier are available.
+const REPOSITORY_PROFILES = new Map([
+  [
+    "pallets/click",
+    {
+      id: "pallets-click-core-v1",
+      language: "python",
+    },
+  ],
+]);
+let snippetQueue = Promise.resolve();
 
-const pyodideLog = [];
-let pyodideRuntimePromise;
-let pytestRuntimePromise;
-let pyodideQueue = Promise.resolve();
-
-function withPyodideLock(task) {
-  const run = pyodideQueue.then(task, task);
-  pyodideQueue = run.catch(() => {});
+function withSnippetLock(task) {
+  const run = snippetQueue.then(task, task);
+  snippetQueue = run.catch(() => {});
   return run;
-}
-
-function getPyodideRuntime() {
-  pyodideRuntimePromise ||= import("pyodide")
-    .then(async ({ loadPyodide }) => {
-      return loadPyodide({
-        stdout: (text) => pyodideLog.push(String(text)),
-        stderr: (text) => pyodideLog.push(String(text)),
-      });
-    })
-    .catch((error) => ({ startupError: String(error?.message || error) }));
-  return pyodideRuntimePromise;
-}
-
-function ensurePytestRuntime(runtime) {
-  pytestRuntimePromise ||= runtime.loadPackage("pytest", {
-        messageCallback: (text) => pyodideLog.push(String(text)),
-        errorCallback: (text) => pyodideLog.push(String(text)),
-    })
-    .then(() => runtime)
-    .catch((error) => ({ startupError: String(error?.message || error) }));
-  return pytestRuntimePromise;
 }
 
 const tools = [
   {
     name: "rescue_python_snippet",
-    description: "Actually run a student's original and AI-repaired Python snippet in a constrained WebAssembly runtime. Use after generating a minimal fix so the answer can show before/after evidence instead of an unverified suggestion.",
+    description: "Actually run a student's original and AI-repaired Python snippet in separate disposable WebAssembly child processes. Use after generating a minimal fix so the answer can show before/after evidence instead of an unverified suggestion.",
     inputSchema: {
       type: "object",
       properties: {
@@ -111,7 +86,7 @@ const tools = [
   },
   {
     name: "inspect_github_project",
-    description: "Inspect an allow-listed public GitHub repository and return its exact commit and Python project evidence.",
+    description: "Inspect a profiled, allow-listed public GitHub repository and return its exact commit and project evidence. Repositories without an explicit verification profile return unsupported.",
     inputSchema: {
       type: "object",
       properties: { repo_url: { type: "string", description: "Public GitHub repository URL" } },
@@ -121,7 +96,7 @@ const tools = [
   },
   {
     name: "reproduce_python_project",
-    description: "Clone and actually run the allow-listed Python repository tests, returning exit code, counts, command and logs.",
+    description: "Compatibility endpoint that refuses Node-side repository execution and directs callers to the Python MCP Docker backend.",
     inputSchema: {
       type: "object",
       properties: { repo_url: { type: "string", description: "Public GitHub repository URL" } },
@@ -144,22 +119,24 @@ function parseRepo(url) {
   return { slug, url: `https://github.com/${slug}.git` };
 }
 
-function run(command, args, options = {}) {
-  const started = Date.now();
-  const result = spawnSync(command, args, {
-    cwd: options.cwd,
-    env: options.env || process.env,
-    encoding: "utf8",
-    timeout: options.timeout || 60000,
-    maxBuffer: 12 * 1024 * 1024,
-  });
+function unsupportedRepositoryProfile(repo, sourceUrl) {
   return {
-    command: [command, ...args].join(" "),
-    exit_code: result.status,
-    timed_out: result.error?.code === "ETIMEDOUT",
-    duration_seconds: Math.round((Date.now() - started) / 100) / 10,
-    stdout: String(result.stdout || "").slice(-12000),
-    stderr: String(result.stderr || result.error?.message || "").slice(-12000),
+    ok: false,
+    status: "unsupported_repository_profile",
+    supported: false,
+    verified: false,
+    executed: false,
+    repository: repo.slug,
+    source_url: String(sourceUrl || ""),
+    commit_sha: null,
+    detected_language: "unknown",
+    repository_profile: null,
+    backend: null,
+    verification_command: null,
+    exit_code: null,
+    counts: null,
+    supported_profiles: [...REPOSITORY_PROFILES.keys()],
+    error: `No explicit verification profile is configured for ${repo.slug}; no repository code was downloaded or executed.`,
   };
 }
 
@@ -191,8 +168,8 @@ function extractTarGz(bytes, destination) {
   }
 }
 
-async function cloneRepository(repoUrl) {
-  const repo = parseRepo(repoUrl);
+async function cloneRepository(repoUrl, parsedRepo = null) {
+  const repo = parsedRepo || parseRepo(repoUrl);
   const root = mkdtempSync(join(tmpdir(), "repo-rescue-node-"));
   const project = join(root, "project");
   mkdirSync(project, { recursive: true });
@@ -213,7 +190,10 @@ async function cloneRepository(repoUrl) {
 }
 
 async function inspectProject(repoUrl) {
-  const snapshot = await cloneRepository(repoUrl);
+  const repo = parseRepo(repoUrl);
+  const profile = REPOSITORY_PROFILES.get(repo.slug);
+  if (!profile) return unsupportedRepositoryProfile(repo, repoUrl);
+  const snapshot = await cloneRepository(repoUrl, repo);
   try {
     let pyproject = "";
     try { pyproject = readFileSync(join(snapshot.project, "pyproject.toml"), "utf8"); } catch {}
@@ -224,7 +204,11 @@ async function inspectProject(repoUrl) {
       repository: snapshot.slug,
       source_url: repoUrl,
       commit_sha: snapshot.commit,
-      detected_language: "python",
+      status: "inspected",
+      supported: true,
+      executed: false,
+      detected_language: profile.language,
+      repository_profile: profile.id,
       requires_python: requiresPython,
       evidence_note: "Commit and project metadata were read from a fresh shallow clone; no test result is claimed by this inspection tool.",
     };
@@ -233,17 +217,24 @@ async function inspectProject(repoUrl) {
   }
 }
 
-function extractCounts(text) {
-  const counts = { passed: 0, failed: 0, skipped: 0, xfailed: 0, errors: 0 };
-  for (const key of Object.keys(counts)) {
-    const matches = [...String(text).matchAll(new RegExp(`(\\d+) ${key}`, "g"))];
-    if (matches.length) counts[key] = Number(matches.at(-1)[1]);
-  }
-  return counts;
-}
-
 function normalizeOutput(text) {
   return String(text ?? "").replace(/\r\n/g, "\n").trimEnd();
+}
+
+function boundedSnippetExecution(result) {
+  const stdout = String(result?.stdout ?? "");
+  const stderr = String(result?.stderr ?? "");
+  const stdoutChars = Number.isFinite(result?.stdout_chars) ? result.stdout_chars : stdout.length;
+  const stderrChars = Number.isFinite(result?.stderr_chars) ? result.stderr_chars : stderr.length;
+  return {
+    ...result,
+    stdout: stdout.slice(-MAX_SNIPPET_STDOUT_CHARS),
+    stderr: stderr.slice(-MAX_SNIPPET_STDERR_CHARS),
+    stdout_chars: stdoutChars,
+    stderr_chars: stderrChars,
+    stdout_truncated: result?.stdout_complete === false || stdoutChars > MAX_SNIPPET_STDOUT_CHARS,
+    stderr_truncated: result?.stderr_complete === false || stderrChars > MAX_SNIPPET_STDERR_CHARS,
+  };
 }
 
 function validateSnippetInput(code, field) {
@@ -251,256 +242,225 @@ function validateSnippetInput(code, field) {
   if (code.length > MAX_SNIPPET_CHARS) throw new Error(`${field} exceeds the ${MAX_SNIPPET_CHARS}-character limit.`);
 }
 
-async function executePythonSnippet(runtime, code, stdinText) {
-  runtime.globals.set("_rr_code", code);
-  runtime.globals.set("_rr_stdin", String(stdinText ?? ""));
-  try {
-    const raw = await runtime.runPythonAsync(`
-import ast, builtins, io, json, sys, traceback
-
-_rr_allowed_imports = {
-    'math', 'statistics', 'random', 're', 'json', 'collections', 'itertools',
-    'functools', 'decimal', 'fractions', 'datetime', 'string', 'heapq', 'bisect'
+function workerFailure(errorType, message) {
+  const bounded = String(message || errorType).slice(-MAX_SNIPPET_STDERR_CHARS);
+  return {
+    ok: false,
+    stdout: "",
+    stderr: bounded,
+    stdout_chars: 0,
+    stderr_chars: bounded.length,
+    stdout_complete: true,
+    stderr_complete: true,
+    error_type: errorType,
+    error_message: bounded.split("\n").at(-1) || bounded,
+  };
 }
-_rr_forbidden_names = {
-    'open', 'exec', 'eval', 'compile', '__import__', 'breakpoint', 'globals',
-    'locals', 'vars', 'getattr', 'setattr', 'delattr', 'memoryview'
-}
 
-def _rr_validate(tree):
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = [alias.name.split('.')[0] for alias in node.names] if isinstance(node, ast.Import) else [(node.module or '').split('.')[0]]
-            if any(name not in _rr_allowed_imports for name in names):
-                raise PermissionError('Only safe standard-library imports are available in quick rescue mode.')
-        if isinstance(node, ast.Name) and node.id in _rr_forbidden_names:
-            raise PermissionError(f'Unsafe operation is not allowed: {node.id}')
-        if isinstance(node, ast.Attribute) and node.attr.startswith('__'):
-            raise PermissionError('Dunder attribute access is not allowed in quick rescue mode.')
+function runSnippetWorker(code, cases) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      ["--max-old-space-size=192", SNIPPET_WORKER_PATH],
+      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+    );
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let failure = null;
+    let timedOut = false;
+    let settled = false;
 
-_rr_tree = ast.parse(_rr_code, filename='<student-code>')
-_rr_validate(_rr_tree)
-_rr_real_import = builtins.__import__
-def _rr_import(name, globals=None, locals=None, fromlist=(), level=0):
-    if name.split('.')[0] not in _rr_allowed_imports:
-        raise PermissionError(f'Import is not allowed in quick rescue mode: {name}')
-    return _rr_real_import(name, globals, locals, fromlist, level)
+    const terminate = () => {
+      if (!child.killed) child.kill("SIGKILL");
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, SNIPPET_WORKER_TIMEOUT_MS);
 
-_rr_safe_builtins = dict(vars(builtins))
-for _rr_name in _rr_forbidden_names:
-    _rr_safe_builtins.pop(_rr_name, None)
-_rr_safe_builtins['__import__'] = _rr_import
-_rr_lines = iter(_rr_stdin.splitlines())
-_rr_safe_builtins['input'] = lambda prompt='': (print(prompt, end='') or next(_rr_lines))
-_rr_out, _rr_err = io.StringIO(), io.StringIO()
-_rr_old_out, _rr_old_err = sys.stdout, sys.stderr
-_rr_events = 0
-def _rr_trace(frame, event, arg):
-    global _rr_events
-    if event in ('line', 'call'):
-        _rr_events += 1
-        if _rr_events > 100000:
-            raise TimeoutError('Execution budget exceeded; check for an infinite loop.')
-    return _rr_trace
-
-_rr_result = {'ok': False, 'stdout': '', 'stderr': '', 'error_type': None, 'error_message': None}
-try:
-    sys.stdout, sys.stderr = _rr_out, _rr_err
-    sys.settrace(_rr_trace)
-    exec(compile(_rr_tree, '<student-code>', 'exec'), {'__builtins__': _rr_safe_builtins}, {})
-    _rr_result['ok'] = True
-except BaseException as exc:
-    _rr_result['error_type'] = type(exc).__name__
-    _rr_result['error_message'] = str(exc)
-    _rr_err.write(''.join(traceback.format_exception_only(type(exc), exc)))
-finally:
-    sys.settrace(None)
-    sys.stdout, sys.stderr = _rr_old_out, _rr_old_err
-    _rr_result['stdout'] = _rr_out.getvalue()[-6000:]
-    _rr_result['stderr'] = _rr_err.getvalue()[-3000:]
-json.dumps(_rr_result, ensure_ascii=False)
-`);
-    return JSON.parse(String(raw));
-  } catch (error) {
-    const message = String(error?.message || error).slice(-3000);
-    const type = /PermissionError/.test(message)
-      ? "PermissionError"
-      : /SyntaxError/.test(message)
-        ? "SyntaxError"
-        : "RuntimeError";
-    return { ok: false, stdout: "", stderr: message, error_type: type, error_message: message.split("\n").at(-1) || message };
-  }
+    child.stdout.on("data", (chunk) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_WORKER_PROTOCOL_BYTES) {
+        failure = {
+          type: "WorkerProtocolError",
+          message: `Snippet worker exceeded the ${MAX_WORKER_PROTOCOL_BYTES}-byte protocol limit.`,
+        };
+        terminate();
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBytes += chunk.length;
+      stderrChunks.push(chunk);
+      while (stderrBytes > MAX_WORKER_STDERR_BYTES && stderrChunks.length > 1) {
+        stderrBytes -= stderrChunks.shift().length;
+      }
+      if (stderrBytes > MAX_WORKER_STDERR_BYTES && stderrChunks.length === 1) {
+        stderrChunks[0] = stderrChunks[0].subarray(-MAX_WORKER_STDERR_BYTES);
+        stderrBytes = stderrChunks[0].length;
+      }
+    });
+    child.on("error", (error) => {
+      failure = { type: "WorkerLaunchError", message: String(error?.message || error) };
+    });
+    child.on("close", (exitCode) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (timedOut) {
+        resolve({
+          ok: false,
+          error_type: "WorkerTimeoutError",
+          error: `Snippet worker exceeded the ${SNIPPET_WORKER_TIMEOUT_MS} ms wall-clock limit.`,
+        });
+        return;
+      }
+      if (failure) {
+        resolve({ ok: false, error_type: failure.type, error: failure.message });
+        return;
+      }
+      const output = Buffer.concat(stdoutChunks).toString("utf8").trim();
+      try {
+        const value = JSON.parse(output);
+        if (!value?.ok || !Array.isArray(value.results) || value.results.length !== cases.length) {
+          const workerError = value?.error || Buffer.concat(stderrChunks).toString("utf8") || `worker exited ${exitCode}`;
+          resolve({ ok: false, error_type: value?.error_type || "WorkerProtocolError", error: workerError });
+          return;
+        }
+        resolve(value);
+      } catch {
+        resolve({
+          ok: false,
+          error_type: "WorkerProtocolError",
+          error: `Snippet worker returned invalid bounded protocol output (exit ${exitCode}).`,
+        });
+      }
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify({ code, cases: cases.map((item) => ({ stdin: String(item?.stdin ?? "") })) }));
+  });
 }
 
 async function rescuePythonSnippet(args) {
   validateSnippetInput(args.original_code, "original_code");
   validateSnippetInput(args.candidate_code, "candidate_code");
-  return withPyodideLock(async () => {
-    const runtime = await getPyodideRuntime();
-    if (runtime.startupError) throw new Error(`Python rescue runtime is unavailable: ${runtime.startupError}`);
+  const submittedCaseCount = Array.isArray(args.test_cases) ? args.test_cases.length : 0;
+  if (submittedCaseCount > MAX_SNIPPET_CASES) {
+    return {
+      ok: false,
+      mode: "single_snippet_rescue",
+      verification_level: "L1_SNIPPET_EXECUTION",
+      status: "invalid_request",
+      fix_verified: false,
+      candidate_passed: false,
+      before_failed: false,
+      case_counts: {
+        submitted: submittedCaseCount,
+        executed: 0,
+        maximum: MAX_SNIPPET_CASES,
+      },
+      error: `test_cases contains ${submittedCaseCount} items; the maximum is ${MAX_SNIPPET_CASES}. No code was executed.`,
+      test_results: [],
+    };
+  }
+  return withSnippetLock(async () => {
     const cases = Array.isArray(args.test_cases) && args.test_cases.length
-      ? args.test_cases.slice(0, MAX_SNIPPET_CASES)
+      ? args.test_cases
       : [{ name: "default", stdin: "" }];
+    // Original and candidate never share an interpreter. The parent process
+    // owns every comparison and verdict, and each worker has a hard timeout.
+    const [beforeBatch, afterBatch] = await Promise.all([
+      runSnippetWorker(args.original_code, cases),
+      runSnippetWorker(args.candidate_code, cases),
+    ]);
     const results = [];
     for (let index = 0; index < cases.length; index += 1) {
       const test = cases[index] || {};
-      const before = await executePythonSnippet(runtime, args.original_code, test.stdin || "");
-      const after = await executePythonSnippet(runtime, args.candidate_code, test.stdin || "");
+      const before = beforeBatch.ok
+        ? beforeBatch.results[index]
+        : workerFailure(beforeBatch.error_type || "WorkerRuntimeError", beforeBatch.error);
+      const after = afterBatch.ok
+        ? afterBatch.results[index]
+        : workerFailure(afterBatch.error_type || "WorkerRuntimeError", afterBatch.error);
       const expectedProvided = Object.prototype.hasOwnProperty.call(test, "expected_stdout");
-      const outputMatches = !expectedProvided || normalizeOutput(after.stdout) === normalizeOutput(test.expected_stdout);
+      const outputMatches = !expectedProvided
+        || (after.stdout_complete !== false && normalizeOutput(after.stdout) === normalizeOutput(test.expected_stdout));
+      const originalOutputMatches = !expectedProvided
+        || (before.stdout_complete !== false && normalizeOutput(before.stdout) === normalizeOutput(test.expected_stdout));
+      const originalFailed = !before.ok || !originalOutputMatches;
       results.push({
         name: String(test.name || `case-${index + 1}`),
         expected_stdout: expectedProvided ? String(test.expected_stdout) : null,
-        before,
-        after,
+        before: boundedSnippetExecution(before),
+        after: boundedSnippetExecution(after),
+        original_failed: originalFailed,
+        original_output_matches: originalOutputMatches,
         candidate_passed: after.ok && outputMatches,
         output_matches: outputMatches,
       });
     }
-    const beforeFailed = results.some((item) => !item.before.ok || (item.expected_stdout !== null && normalizeOutput(item.before.stdout) !== normalizeOutput(item.expected_stdout)));
+    const beforeFailed = results.some((item) => item.original_failed);
     const candidatePassed = results.every((item) => item.candidate_passed);
-    const fixVerified = beforeFailed && candidatePassed;
+    const oracleBacked = results.every((item) => item.expected_stdout !== null);
+    const sourceChanged = args.original_code !== args.candidate_code;
+    const runtimeRepairObserved = sourceChanged && beforeFailed && candidatePassed;
+    const fixVerified = oracleBacked && runtimeRepairObserved;
     return {
       ok: true,
       mode: "single_snippet_rescue",
       verification_level: "L1_SNIPPET_EXECUTION",
+      execution_backend: "pyodide_disposable_child_process",
+      worker_timeout_ms: SNIPPET_WORKER_TIMEOUT_MS,
       status: fixVerified ? "fix_verified" : candidatePassed ? "candidate_runs" : "candidate_failed",
       fix_verified: fixVerified,
       candidate_passed: candidatePassed,
       before_failed: beforeFailed,
+      source_changed: sourceChanged,
+      oracle_backed: oracleBacked,
+      runtime_repair_observed: runtimeRepairObserved,
+      case_counts: {
+        submitted: submittedCaseCount,
+        executed: results.length,
+        maximum: MAX_SNIPPET_CASES,
+      },
       reported_error: String(args.reported_error || "").slice(0, 2000) || null,
       test_results: results,
       user_summary: fixVerified
         ? `修复已真实运行验证：修改前失败，修改后通过 ${results.length} 个用例。`
         : candidatePassed
-          ? `候选代码通过 ${results.length} 个运行用例，但未观察到修改前失败，不能宣称已验证修复。`
+          ? runtimeRepairObserved && !oracleBacked
+            ? `候选代码不再报错，但用例缺少预期输出，只能证明运行恢复，不能宣称正确修复。`
+            : `候选代码通过 ${results.length} 个运行用例，但未观察到可验证的源码修复，不能宣称已验证修复。`
           : `候选代码仍未通过全部运行用例，请根据错误继续修改。`,
       boundary: "This verifies the supplied snippet and test cases only; it is not a full-project or paper reproduction claim.",
     };
   });
 }
 
-async function reproduceWithPyodide(snapshot) {
-  let runtime = await getPyodideRuntime();
-  if (runtime.startupError) {
-    return {
-      status: "pyodide_unavailable",
-      verified: false,
-      repository: snapshot.slug,
-      commit_sha: snapshot.commit,
-      backend: "pyodide_wasm_allowlist",
-      exit_code: null,
-      counts: null,
-      error: runtime.startupError,
-    };
-  }
-  runtime = await ensurePytestRuntime(runtime);
-  if (runtime.startupError) {
-    return {
-      status: "pytest_runtime_unavailable",
-      verified: false,
-      repository: snapshot.slug,
-      commit_sha: snapshot.commit,
-      backend: "pyodide_wasm_allowlist",
-      exit_code: null,
-      counts: null,
-      error: runtime.startupError,
-    };
-  }
-  pyodideLog.length = 0;
-  const started = Date.now();
-  let exitCode = null;
-  let mounted = false;
-  try {
-    runtime.mountNodeFS("/project", snapshot.project);
-    mounted = true;
-    exitCode = Number(await runtime.runPythonAsync(`
-import os, sys, pytest
-os.chdir('/project')
-sys.path.insert(0, '/project/src')
-result = pytest.main(['-q', '-p', 'no:cacheprovider', 'tests/test_basic.py'])
-int(result)
-`));
-  } catch (error) {
-    pyodideLog.push(String(error?.message || error));
-  } finally {
-    // The Pyodide runtime is reused across MCP calls. Always leave its current
-    // directory outside the NodeFS mount, remove stale import paths, and
-    // unmount before the temporary checkout is deleted by reproduceProject().
-    try {
-      await runtime.runPythonAsync(`
-import os, sys
-os.chdir('/')
-sys.path[:] = [p for p in sys.path if not p.startswith('/project')]
-`);
-    } finally {
-      if (mounted) runtime.FS.unmount("/project");
-    }
-  }
-  const output = pyodideLog.join("\n");
-  return {
-    status: exitCode === 0 ? "verified" : "verification_failed",
-    verified: exitCode === 0,
-    repository: snapshot.slug,
-    commit_sha: snapshot.commit,
-    backend: "pyodide_wasm_allowlist",
-    verification_command: "pytest -q -p no:cacheprovider tests/test_basic.py",
-    exit_code: exitCode,
-    timed_out: false,
-    duration_seconds: Math.round((Date.now() - started) / 100) / 10,
-    counts: extractCounts(output),
-    log_tail: output.slice(-10000),
-    evidence_note: "A deterministic core smoke suite actually executed in sandboxed CPython WebAssembly because the host did not expose native Python; this is not a claim that the full upstream suite ran.",
-  };
-}
-
 async function reproduceProject(repoUrl) {
-  const snapshot = await cloneRepository(repoUrl);
-  try {
-    const pythonCandidates = process.platform === "win32" ? ["python"] : ["python3", "python"];
-    let python = null;
-    for (const candidate of pythonCandidates) {
-      const check = run(candidate, ["--version"], { timeout: 5000 });
-      if (check.exit_code === 0) { python = candidate; break; }
-    }
-    if (!python) {
-      const fallback = await withPyodideLock(() => reproduceWithPyodide(snapshot));
-      return withAttestation(fallback);
-    }
-
-    let execution = run(python, ["-m", "pytest", "-q", "--ignore=tests/test_utils/test_echo_via_pager.py"], {
-      cwd: snapshot.project,
-      timeout: 90000,
-      env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONPATH: join(snapshot.project, "src") },
-    });
-    if (/No module named pytest/.test(execution.stderr)) {
-      const site = join(snapshot.root, "site");
-      const install = run(python, ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--progress-bar", "off", "--target", site, "pytest>=8,<10"], { timeout: 60000 });
-      if (install.exit_code !== 0) return { verified: false, repository: snapshot.slug, commit_sha: snapshot.commit, status: "pytest_install_failed", install };
-      execution = run(python, ["-m", "pytest", "-q", "--ignore=tests/test_utils/test_echo_via_pager.py"], {
-        cwd: snapshot.project,
-        timeout: 90000,
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONPATH: `${site}${process.platform === "win32" ? ";" : ":"}${join(snapshot.project, "src")}` },
-      });
-    }
-    const output = `${execution.stdout}\n${execution.stderr}`;
-    return withAttestation({
-      status: execution.exit_code === 0 && !execution.timed_out ? "verified" : "verification_failed",
-      verified: execution.exit_code === 0 && !execution.timed_out,
-      repository: snapshot.slug,
-      commit_sha: snapshot.commit,
-      backend: "hosted_direct_allowlist",
-      verification_command: execution.command,
-      exit_code: execution.exit_code,
-      timed_out: execution.timed_out,
-      duration_seconds: execution.duration_seconds,
-      counts: extractCounts(output),
-      log_tail: output.slice(-10000),
-      evidence_note: "Verification status is derived only from this allow-listed hosted process exit code.",
-    });
-  } finally {
-    rmSync(snapshot.root, { recursive: true, force: true });
-  }
+  const repo = parseRepo(repoUrl);
+  const profile = REPOSITORY_PROFILES.get(repo.slug);
+  return {
+    ok: false,
+    status: "repository_execution_disabled",
+    supported: false,
+    verified: false,
+    executed: false,
+    repository: repo.slug,
+    source_url: String(repoUrl || ""),
+    commit_sha: null,
+    detected_language: profile?.language || "unknown",
+    repository_profile: profile?.id || null,
+    backend: null,
+    verification_command: null,
+    exit_code: null,
+    counts: null,
+    error: "The Node stdio launcher never clones or executes repository code. Use the Python RepoRescue MCP backend with Docker isolation for repository reproduction, repair, and verification.",
+    next_step: "Start the Python MCP server and call its prepare_repair / verify_repair workflow with Docker enabled.",
+  };
 }
 
 function windowsProbe() {
@@ -535,7 +495,7 @@ input.on("line", async (line) => {
   try {
     let result;
     if (request.method === "initialize") {
-      result = { protocolVersion: request.params?.protocolVersion || "2025-03-26", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "repo-rescue-mcp", version: "0.2.0" } };
+      result = { protocolVersion: request.params?.protocolVersion || "2025-03-26", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "repo-rescue-mcp", version: "0.3.0" } };
     } else if (request.method === "ping") {
       result = {};
     } else if (request.method === "tools/list") {

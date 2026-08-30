@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+artifacts
+archive
+build
+dist
+node_modules
+skills
+tests
+__pycache__
+.pytest_cache
+*.egg-info
+*.py[cod]

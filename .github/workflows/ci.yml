@@ -1,0 +1,77 @@
+name: reliability
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Test hosted snippet backend
+        run: npm test
+
+      - name: Run deterministic snippet benchmark
+        run: npm run benchmark
+
+      - name: Install Python backend
+        run: python -m pip install -e ".[dev]"
+
+      - name: Test repository repair backend
+        run: python -m pytest
+
+      - name: Smoke-test MCP tool discovery
+        run: python scripts/smoke_stdio.py
+
+      - name: Smoke-test MCP repair and artifact retrieval
+        run: python scripts/smoke_mcp.py
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Build MCP service image
+        run: docker build -t repo-rescue-mcp:test .
+
+      - name: Build repository verifier image
+        run: docker build -t repo-rescue-python:3.11 -f sandbox/Dockerfile.python311 .
+
+      - name: Install repository orchestrator
+        run: python -m pip install -e .
+
+      - name: Run Docker baseline-repair-verify smoke
+        run: python scripts/smoke_docker.py
