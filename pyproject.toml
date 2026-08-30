@@ -4,11 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repo-rescue-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Evidence-first repository inspection and sandboxed reproduction MCP server for RepoRescue."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "anyio>=4.5,<5",
   "dulwich>=0.22.8,<0.25",
   "mcp[cli]>=1.28.1,<2",
   "packaging>=24.2,<27",
@@ -31,6 +32,13 @@ repo-rescue = "repo_rescue.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/repo_rescue"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/pyproject.toml",
+  "/README.md",
+  "/src/repo_rescue",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

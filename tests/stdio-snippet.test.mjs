@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 function runServer(messages, environment = {}) {
   return new Promise((resolve, reject) => {
+    const childEnvironment = { ...process.env };
+    delete childEnvironment.REPO_RESCUE_NODE_TOOLSET;
+    Object.assign(childEnvironment, environment);
     const child = spawn(process.execPath, ["stdio-server.mjs"], {
       cwd: new URL("..", import.meta.url),
-      env: { ...process.env, ...environment },
+      env: childEnvironment,
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -51,6 +54,7 @@ test("lists and executes verified snippet rescue", async () => {
     },
   ]);
 
+  assert.equal(responses.find((response) => response.id === 1).result.serverInfo.version, "0.4.0");
   const listed = responses.find((response) => response.id === 2).result.tools;
   assert.deepEqual(
     listed.map((tool) => tool.name),
@@ -66,6 +70,84 @@ test("lists and executes verified snippet rescue", async () => {
   assert.equal(payload.fix_verified, true);
   assert.equal(payload.test_results[0].before.error_type, "IndexError");
   assert.equal(payload.test_results[0].after.stdout, "3\n");
+});
+
+test("snippet toolset exposes only snippet rescue and rejects direct hidden calls", async () => {
+  const responses = await runServer(
+    [
+      { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "inspect_github_project",
+          arguments: { repo_url: "https://github.com/pallets/click" },
+        },
+      },
+    ],
+    { REPO_RESCUE_NODE_TOOLSET: "snippet" },
+  );
+
+  assert.deepEqual(
+    responses.find((response) => response.id === 1).result.tools.map((tool) => tool.name),
+    ["rescue_python_snippet"],
+  );
+  const hiddenResponse = responses.find((response) => response.id === 2).result;
+  const hiddenPayload = JSON.parse(hiddenResponse.content[0].text);
+  assert.equal(hiddenResponse.isError, true);
+  assert.equal(hiddenPayload.ok, false);
+  assert.equal(hiddenPayload.verified, false);
+  assert.equal(hiddenPayload.status, "tool_unavailable");
+  assert.match(hiddenPayload.error, /disabled by REPO_RESCUE_NODE_TOOLSET=snippet/);
+});
+
+test("an invalid explicit Node toolset fails closed to snippet-only", async () => {
+  const responses = await runServer(
+    [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }],
+    { REPO_RESCUE_NODE_TOOLSET: "misspelled-full" },
+  );
+
+  assert.deepEqual(
+    responses[0].result.tools.map((tool) => tool.name),
+    ["rescue_python_snippet"],
+  );
+});
+
+test("an explicitly empty Node toolset also fails closed to snippet-only", async () => {
+  const responses = await runServer(
+    [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }],
+    { REPO_RESCUE_NODE_TOOLSET: "" },
+  );
+
+  assert.deepEqual(
+    responses[0].result.tools.map((tool) => tool.name),
+    ["rescue_python_snippet"],
+  );
+});
+
+test("rejects oversized snippet case metadata before starting a worker", async () => {
+  const responses = await runServer([
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "rescue_python_snippet",
+        arguments: {
+          original_code: "print('before')",
+          candidate_code: "print('after')",
+          test_cases: [{ name: "x".repeat(201), stdin: "", expected_stdout: "after" }],
+        },
+      },
+    },
+  ]);
+
+  const payload = JSON.parse(responses[0].result.content[0].text);
+  assert.equal(payload.status, "invalid_request");
+  assert.equal(payload.fix_verified, false);
+  assert.equal(payload.case_counts.executed, 0);
+  assert.match(payload.error, /name exceeds the 200-character limit/);
 });
 
 test("rejects unsafe snippet capabilities", async () => {
@@ -352,4 +434,33 @@ test("disables Node repository execution before cloning or invoking host Python"
   assert.equal(payload.verification_command, null);
   assert.match(payload.error, /never clones or executes repository code/i);
   assert.match(payload.error, /Python RepoRescue MCP backend with Docker isolation/i);
+});
+
+test("npm dry-run package contains only the hosted Node runtime", () => {
+  const repositoryRoot = new URL("..", import.meta.url);
+  const npmArgs = ["pack", "--dry-run", "--json", "--ignore-scripts"];
+  const npmCli = process.env.npm_execpath;
+  const packed = npmCli
+    ? spawnSync(process.execPath, [npmCli, ...npmArgs], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+    })
+    : spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", npmArgs, {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      shell: process.platform === "win32",
+    });
+
+  assert.equal(packed.status, 0, packed.stderr || packed.stdout);
+  const manifest = JSON.parse(packed.stdout)[0];
+  const paths = manifest.files.map((file) => file.path).sort();
+  assert.deepEqual(paths, [
+    "README.md",
+    "package.json",
+    "snippet-worker.mjs",
+    "stdio-server.mjs",
+  ]);
+  assert.equal(paths.some((path) => path.startsWith("archive/")), false);
+  assert.equal(paths.includes("stdio-server.mjs"), true, "the npx bin target must be packaged");
+  assert.equal(paths.includes("snippet-worker.mjs"), true, "the bin's runtime worker must be packaged");
 });

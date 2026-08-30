@@ -18,6 +18,22 @@ async def exercise_server(port: int) -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
+            names = {tool.name for tool in tools.tools}
+            expected = {
+                "inspect_github_project",
+                "reproduce_python_project",
+                "repair_github_project",
+                "prepare_github_repair",
+                "start_prepare_github_repair",
+                "verify_github_patch",
+                "start_verify_github_patch",
+                "get_repair_job",
+                "run_interview_demo",
+                "get_repair_artifact",
+                "windows_environment_probe",
+            }
+            if len(names) != 11 or names != expected:
+                raise RuntimeError("HTTP transport did not expose exactly the documented 11-tool contract.")
             print("TOOLS=" + ",".join(tool.name for tool in tools.tools))
             result = await session.call_tool(
                 "inspect_github_project",
@@ -34,6 +50,13 @@ async def exercise_server(port: int) -> None:
             demo = await session.call_tool("run_interview_demo", {})
             demo_text = demo.content[0].text
             payload = json.loads(demo_text)
+            if (
+                demo.isError
+                or payload.get("ok") is not True
+                or payload.get("repair", {}).get("status") != "verified_repair"
+                or payload.get("repair", {}).get("verified_repair") is not True
+            ):
+                raise RuntimeError("MCP interview Demo did not produce a verified repair.")
             print(f"DEMO_STATUS={payload['repair']['status']}")
             print(f"DEMO_RUN_ID={payload['repair']['run_id']}")
             print(f"ARTIFACT_ACCESS={payload['repair']['artifacts']['retrieval_tool']}")
@@ -44,6 +67,10 @@ async def exercise_server(port: int) -> None:
                 {"run_id": payload["repair"]["run_id"], "artifact": "patch"},
             )
             artifact_payload = json.loads(artifact.content[0].text)["artifact"]
+            if artifact.isError or artifact_payload.get("complete") is not True:
+                raise RuntimeError("MCP patch artifact was not returned completely.")
+            if "--- a/" not in artifact_payload["content"] or "+++ b/" not in artifact_payload["content"]:
+                raise RuntimeError("MCP patch artifact did not contain a unified diff.")
             print(f"ARTIFACT_COMPLETE={artifact_payload['complete']}")
             print(f"ARTIFACT_HAS_DIFF={'return a / b' in artifact_payload['content']}")
             evidence = await session.call_tool(
@@ -51,6 +78,9 @@ async def exercise_server(port: int) -> None:
                 {"run_id": payload["repair"]["run_id"], "artifact": "evidence"},
             )
             evidence_content = json.loads(evidence.content[0].text)["artifact"]["content"]
+            evidence_payload = json.loads(evidence_content)
+            if evidence.isError or evidence_payload.get("verified_repair") is not True:
+                raise RuntimeError("MCP evidence artifact did not preserve the verified repair verdict.")
             if str(Path.cwd()) in demo_text or "repo-rescue-local-" in demo_text or "file:///" in demo_text:
                 raise RuntimeError("MCP demo response exposed a local repository or temporary path.")
             if str(Path.cwd()) in evidence_content or "repo-rescue-local-" in evidence_content or "file:///" in evidence_content:

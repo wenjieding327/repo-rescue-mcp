@@ -75,7 +75,7 @@ npm run benchmark
 node .\stdio-server.mjs
 ```
 
-For compatibility the Node launcher still describes read-only/disabled repository tool names, but `reproduce_python_project` never clones or executes repository code there. A public Agent should bind only Node `rescue_python_snippet` and use the Python MCP for repository tools.
+For compatibility the Node launcher defaults to the four-tool surface, but `reproduce_python_project` never clones or executes repository code there. Set `REPO_RESCUE_NODE_TOOLSET=snippet` on a public hosted instance; both discovery and direct calls then expose only `rescue_python_snippet`. Use the Python MCP for every repository tool.
 
 ### `rescue_python_snippet`
 
@@ -115,7 +115,7 @@ $env:REPO_RESCUE_ALLOWED_REPOS="owner/broken-repository"
 
 The repair command uses the [OpenAI Responses API](https://developers.openai.com/api/docs/guides/latest-model). `REPO_RESCUE_OPENAI_MODEL` selects the model and defaults to `gpt-5.6-terra`. The repository must be public and explicitly allow-listed; arbitrary shell commands are never accepted.
 
-To expose the same workflow as MCP, run `.venv\Scripts\repo-rescue-mcp`. The Streamable HTTP endpoint defaults to `http://localhost:8000/mcp`; set `REPO_RESCUE_TRANSPORT=stdio` for a command-based host.
+To expose the same workflow as MCP, run `.venv\Scripts\repo-rescue-mcp`. The Streamable HTTP endpoint defaults to `http://localhost:8000/mcp`; set `REPO_RESCUE_TRANSPORT=stdio` for a command-based host or `REPO_RESCUE_TRANSPORT=sse` for a legacy SSE client. Direct SSE uses the verified root `/sse` and `/messages/` routes. If a public URL needs a path prefix, add it in a reverse proxy rather than setting a FastMCP runtime mount path.
 
 The root `Dockerfile` packages the MCP API and trusted interview Demo; it does not embed a Docker daemon. Run full repository repair from a host/worker that can reach the separately built `repo-rescue-python:3.11` verifier image. Do not expose a privileged Docker socket to anonymous callers.
 
@@ -130,6 +130,20 @@ host model generates complete-file replacements
 verify_github_patch(repo_url, expected_commit, expected_baseline_sha256, changes)
   → fresh checkout + baseline hash match + protected patch + same-command re-verification
 ```
+
+Agent platforms with short tool-call deadlines should use the asynchronous equivalents:
+
+```text
+start_prepare_github_repair(repo_url) → job_id
+get_repair_job(job_id, wait_seconds<=20) → preparation result
+host model generates complete-file replacements
+start_verify_github_patch(...) → job_id
+get_repair_job(job_id, wait_seconds<=20) → verified result
+```
+
+The actual wire shape is `start.job.job_id`, followed by `poll.job.terminal/status/result`; preparation lives at `job.result.preparation` and the final verdict at `job.result.repair.verified_repair`. A job status of `succeeded` means only that the backend operation returned—not that a repair was verified. Jobs run with single-worker concurrency, unguessable IDs, a bounded active-job queue, a separately bounded completed-result cache, and a finite in-memory TTL. Long polls run off the ASGI event loop under their own concurrency limiter.
+
+The in-memory job store is deliberately a single-instance competition/demo design: run exactly one application process and one replica so a start and its polls reach the same store. Jobs do not survive restart or rolling deployment. A commercial multi-worker or multi-replica service must move the queue and results to Redis or a database, authenticate callers, enforce per-tenant rate limits, and terminate TLS at a gateway.
 
 This path still requires an isolated execution backend. Local untrusted repositories use Docker. A managed host may use `REPO_RESCUE_EXECUTION_BACKEND=direct` only when the whole service already runs inside a disposable, resource-limited container and the repository is explicitly allow-listed. If dependency installation prevents the baseline pytest run, a later passing suite is reported as `repair_tests_passed_uncompared`, not `verified_repair`, because the original test coverage could not be measured.
 
@@ -150,6 +164,10 @@ Runs the full repository loop: commit-pinned clone, Docker baseline, bounded Rep
 ### `prepare_github_repair` + `verify_github_patch`
 
 Runs the same evidence protocol with the surrounding agent host as the Repair Agent. Preparation is never called a success. The second tool checks both the 40-character commit and preparation baseline hash, applies only bounded replacements to existing allowed files, reruns dependency analysis and installation, and reports a repair only when the exact verifier command passes. A repair may change versions of existing dependency names; adding a new distribution requires explicit administrator approval through `REPO_RESCUE_ALLOWED_ADDITIONAL_DEPENDENCIES`.
+
+### `start_prepare_github_repair` + `start_verify_github_patch` + `get_repair_job`
+
+Runs the same preparation and verification operations through a bounded background queue for agent platforms that disconnect long synchronous calls. Polling never restarts an operation. Only the terminal job result—and ultimately `verified_repair=true`—can support a repair claim.
 
 ### `run_interview_demo`
 

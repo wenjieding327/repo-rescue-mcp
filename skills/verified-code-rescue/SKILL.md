@@ -13,7 +13,7 @@ Choose the smallest mode that can solve the request:
 
 1. **Snippet rescue** — pasted code, a function, an assignment, or an error. Generate the repair, then call `rescue_python_snippet` with the original and candidate code.
 2. **File rescue** — one source file or notebook. Inspect the whole file, preserve public behavior, add focused tests, run them, and summarize the diff.
-3. **Project rescue** — a public GitHub repository. Use `inspect_github_project` for read-only understanding. For a no-key host-agent repair, call `prepare_github_repair`, generate the smallest bounded complete-file replacements from its untrusted context, then call `verify_github_patch`. Use `reproduce_python_project` only for an explicitly profiled test scope. Separate inspection, repair, test execution, official-demo reproduction, and paper-metric reproduction.
+3. **Project rescue** — a public GitHub repository. Use `inspect_github_project` for read-only understanding. For a no-key host-agent repair on a short-call platform, call `start_prepare_github_repair`, poll that job with `get_repair_job`, generate the smallest bounded complete-file replacements from its untrusted context, call `start_verify_github_patch`, then poll the new job. A long-call local host may use the synchronous `prepare_github_repair` → `verify_github_patch` pair instead; never mix both protocols in one repair. Use `reproduce_python_project` only for an explicitly profiled test scope. Separate inspection, repair, test execution, official-demo reproduction, and paper-metric reproduction.
 
 Do not force a repository workflow on a small question. Do not ask users to extract metadata that the available tools can discover.
 
@@ -25,7 +25,7 @@ Do not force a repository workflow on a small question. Do not ask users to extr
 4. Build one to four focused cases from supplied examples or obvious edge cases. Never invent hidden assignment requirements.
 5. Execute before and after:
    - For Python snippets, call `rescue_python_snippet` with both versions and the focused cases.
-   - For repositories, never treat preparation as success. Pass both the exact `expected_commit` and `expected_baseline_sha256` from preparation into `verify_github_patch`; a host-generated proposal becomes verified only when that tool reports `verified_repair=true` for the same recorded command and non-weakened test scope.
+   - For repositories, never treat a successful start, poll, or preparation as a repair. On the asynchronous path, save `start.job.job_id`, poll that same live job until terminal, and read preparation only from `poll.job.result.preparation`. Stop on a root `ok=false`, terminal failed result, `already_passing`, or `repairable=false`; start over from preparation after an unknown/expired ID. Continue only when `repairable=true`, pass its exact `repository.commit` and `baseline_sha256` into verification, then save and poll the new verify job. A host-generated proposal becomes verified only when `poll.job.result.repair.verified_repair=true` for the same recorded command and non-weakened test scope. Treat `repair_tests_passed_uncompared` and `repair_smoke_passed` as evidence-insufficient warnings, not verified repairs.
    - Use `get_repair_artifact` with the returned run ID when patch/report/evidence content is needed; do not expose server-local paths.
    - For files or repositories, run the narrowest relevant tests first, then broaden only when useful.
 6. Iterate on the candidate when the tool returns `candidate_failed`. Do not stop at the first plausible edit.

@@ -1,12 +1,16 @@
 {
   "name": "repo-rescue-mcp-stdio",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Python-free Node stdio launcher for hosted MCP platforms that provide Node.js but not uvx.",
   "type": "module",
   "bin": {
     "repo-rescue-mcp-stdio": "./stdio-server.mjs"
   },
+  "files": [
+    "stdio-server.mjs",
+    "snippet-worker.mjs"
+  ],
   "scripts": {
     "test": "node --test tests/stdio-snippet.test.mjs",
     "benchmark": "node scripts/snippet-benchmark.mjs"
