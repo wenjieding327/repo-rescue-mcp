@@ -3,8 +3,9 @@ from __future__ import annotations
 import configparser
 import json
 import re
+import shlex
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -42,6 +43,16 @@ _PYTEST_DECLARATION = re.compile(
     r"(?m)^\s*(?:(?:async\s+)?def\s+test_[A-Za-z0-9_]*\s*\(|class\s+Test[A-Za-z0-9_]*\b)"
 )
 
+_ROOT_PYTEST_CONFIGS = (
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "pyproject.toml",
+    "tox.ini",
+    "setup.cfg",
+)
+
 
 def _requirements_manifests(files: set[str]) -> list[str]:
     discovered = {
@@ -68,18 +79,21 @@ def _is_execution_requirements_manifest(relative: str) -> bool:
     return any(part.lower() in {"test", "tests"} for part in path.parts[:-1])
 
 
+def _is_test_tree_part(part: str) -> bool:
+    lowered = part.lower()
+    return bool(
+        lowered in {"test", "tests", "testing", "spec", "specs"}
+        or lowered.startswith(("test_", "tests_"))
+        or lowered.endswith(("_test", "_tests"))
+    )
+
+
 def _is_test_file(relative: str) -> bool:
     path = Path(relative)
     if path.suffix.lower() != ".py":
         return False
-    parts = {part.lower() for part in path.parts[:-1]}
     name = path.name.lower()
-    named_test_tree = any(
-        part in {"test", "tests", "testing", "spec", "specs"}
-        or part.startswith(("test_", "tests_"))
-        or part.endswith(("_test", "_tests"))
-        for part in parts
-    )
+    named_test_tree = any(_is_test_tree_part(part) for part in path.parts[:-1])
     return bool(named_test_tree or name.startswith("test_") or name.endswith("_test.py"))
 
 
@@ -91,6 +105,144 @@ def _read_text(root: Path, relative: str, limit: int = 131_072) -> str | None:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+
+
+def _normalise_pytest_testpaths(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        try:
+            candidates = shlex.split(raw, posix=True)
+        except ValueError:
+            return []
+    elif isinstance(raw, list):
+        candidates = [item for item in raw if isinstance(item, str)]
+    else:
+        return []
+
+    normalised: list[str] = []
+    for candidate in candidates:
+        value = candidate.strip().replace("\\", "/")
+        raw_parts = value.split("/")
+        if (
+            not value
+            or value.startswith(("/", "-"))
+            or re.match(r"^[A-Za-z]:", value)
+            or any(part == ".." for part in raw_parts)
+            or any(character in value for character in "*?[]")
+        ):
+            continue
+        relative = PurePosixPath(value).as_posix()
+        if relative not in {"", "."} and relative not in normalised:
+            normalised.append(relative)
+    return normalised
+
+
+def _normalise_native_pytest_testpaths(raw: Any) -> list[str]:
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        return []
+    return _normalise_pytest_testpaths(raw)
+
+
+def _pytest_testpaths_from_toml(text: str, name: str) -> tuple[bool, list[str]]:
+    try:
+        data = tomllib.loads(text.lstrip("\ufeff"))
+    except tomllib.TOMLDecodeError:
+        return True, []
+    if name in {"pytest.toml", ".pytest.toml"}:
+        options = data.get("pytest", {})
+        if not isinstance(options, dict):
+            return True, []
+        return True, _normalise_native_pytest_testpaths(options.get("testpaths"))
+
+    tool = data.get("tool", {})
+    if not isinstance(tool, dict) or "pytest" not in tool:
+        return False, []
+    pytest = tool.get("pytest")
+    if not isinstance(pytest, dict):
+        return True, []
+    native_options = {key: value for key, value in pytest.items() if key != "ini_options"}
+    missing = object()
+    ini_options = pytest.get("ini_options", missing)
+    if native_options and ini_options is not missing:
+        return True, []
+    if native_options:
+        return True, _normalise_native_pytest_testpaths(native_options.get("testpaths"))
+    if ini_options is not missing:
+        if not isinstance(ini_options, dict):
+            return True, []
+        return True, _normalise_pytest_testpaths(ini_options.get("testpaths"))
+    return False, []
+
+
+def _pytest_testpaths_from_ini(text: str, name: str) -> tuple[bool, list[str]]:
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text.lstrip("\ufeff"))
+    except configparser.Error:
+        return True, []
+    if name == "setup.cfg":
+        if parser.has_section("tool:pytest"):
+            value = parser.get("tool:pytest", "testpaths", fallback=None)
+            return True, _normalise_pytest_testpaths(value)
+        if parser.has_section("pytest"):
+            return True, []
+        return False, []
+    if name in {"pytest.ini", ".pytest.ini"}:
+        value = parser.get("pytest", "testpaths", fallback=None)
+        return True, _normalise_pytest_testpaths(value)
+    if parser.has_section("pytest"):
+        value = parser.get("pytest", "testpaths", fallback=None)
+        return True, _normalise_pytest_testpaths(value)
+    return False, []
+
+
+def _root_pytest_testpaths(root: Path, files: set[str]) -> list[str]:
+    for name in _ROOT_PYTEST_CONFIGS:
+        if name not in files:
+            continue
+        text = _read_text(root, name)
+        if text is None:
+            return []
+        if name.endswith(".toml"):
+            valid, configured = _pytest_testpaths_from_toml(text, name)
+        else:
+            valid, configured = _pytest_testpaths_from_ini(text, name)
+        if valid:
+            return configured
+    return []
+
+
+def _linked_nested_requirements(
+    files: set[str],
+    test_files: list[str],
+    configured_testpaths: list[str],
+) -> set[str]:
+    requirements_by_directory = {
+        PurePosixPath(name).parent.as_posix(): name
+        for name in files
+        if PurePosixPath(name).name == "requirements.txt"
+        and len(PurePosixPath(name).parts) > 1
+    }
+    linked: set[str] = set()
+    for configured in configured_testpaths:
+        prefix = f"{configured.rstrip('/')}/"
+        if not any(name == configured or name.startswith(prefix) for name in test_files):
+            continue
+        parts = PurePosixPath(configured).parts
+        test_tree_index = next(
+            (index for index, part in enumerate(parts) if _is_test_tree_part(part)),
+            None,
+        )
+        if test_tree_index is None or test_tree_index == 0:
+            continue
+        application_root = PurePosixPath(*parts[:test_tree_index])
+        candidate = application_root
+        while candidate.as_posix() != ".":
+            manifest = requirements_by_directory.get(candidate.as_posix())
+            if manifest:
+                linked.add(manifest)
+                break
+            candidate = candidate.parent
+    return linked
 
 
 def _requirement_lines(text: str) -> tuple[list[str], list[str]]:
@@ -123,6 +275,14 @@ def _pyproject(text: str) -> dict[str, Any]:
     dependency_groups = data.get("dependency-groups", {})
     build = data.get("build-system", {}) if isinstance(data.get("build-system", {}), dict) else {}
     tool = data.get("tool", {}) if isinstance(data.get("tool", {}), dict) else {}
+    pytest_table = tool.get("pytest")
+    pytest_configured = bool(
+        isinstance(pytest_table, dict)
+        and (
+            "ini_options" in pytest_table
+            or any(key != "ini_options" for key in pytest_table)
+        )
+    )
     test_dependencies: list[str] = []
     if isinstance(optional, dict):
         selected_extra = next(
@@ -148,7 +308,7 @@ def _pyproject(text: str) -> dict[str, Any]:
         "dependency_groups": sorted(dependency_groups) if isinstance(dependency_groups, dict) else [],
         "test_dependencies": test_dependencies,
         "build_backend": build.get("build-backend"),
-        "pytest_configured": isinstance(tool.get("pytest"), dict),
+        "pytest_configured": pytest_configured,
     }
 
 
@@ -165,13 +325,16 @@ def _setup_cfg(text: str) -> dict[str, Any]:
         "requires_python": requires_python,
         "dependencies": dependencies,
         "rejected_dependencies": rejected,
-        "pytest_configured": parser.has_section("tool:pytest") or parser.has_section("pytest"),
+        "pytest_configured": parser.has_section("tool:pytest"),
     }
 
 
 def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
     root = snapshot.path
     file_set = set(snapshot.files)
+    test_files = [name for name in snapshot.files if _is_test_file(name)]
+    configured_testpaths = _root_pytest_testpaths(root, file_set)
+    linked_requirements = _linked_nested_requirements(file_set, test_files, configured_testpaths)
     manifests: dict[str, Any] = {}
     declared_dependencies: list[str] = []
     execution_dependencies: list[str] = []
@@ -189,7 +352,10 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
         evidence.append({"source": manifest, "fact": "manifest_present"})
         if Path(manifest).name.lower().startswith("requirements"):
             accepted, rejected = _requirement_lines(text)
-            selected_for_execution = _is_execution_requirements_manifest(manifest)
+            selected_for_execution = (
+                _is_execution_requirements_manifest(manifest)
+                or manifest in linked_requirements
+            )
             if selected_for_execution:
                 declared_dependencies.extend(accepted)
                 execution_dependencies.extend(accepted)
@@ -221,7 +387,6 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
         else:
             manifests[manifest] = {"status": "present", "preview": text[:300]}
 
-    test_files = [name for name in snapshot.files if _is_test_file(name)]
     static_test_module_count = sum(
         1
         for name in test_files

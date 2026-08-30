@@ -12,9 +12,16 @@ from .orchestrator import run_builtin_demo, run_github_repair
 from .repository import clone_public_repository
 
 
+def _print_json(payload: dict[str, Any]) -> None:
+    # JSON mode is a machine interface, so keep stdout ASCII-only. This avoids
+    # UnicodeEncodeError on Windows consoles whose active encoding cannot
+    # represent repository content, while json.loads restores the exact text.
+    print(json.dumps(payload, ensure_ascii=True, indent=2))
+
+
 def _print_result(report: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        _print_json(report)
         return
     baseline = report.get("baseline", {})
     final = report.get("final_verification", {})
@@ -45,7 +52,7 @@ def _artifacts_path(value: str) -> Path:
 
 def _print_inspection(inspection: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps(inspection, ensure_ascii=False, indent=2))
+        _print_json(inspection)
         return
     repository = inspection.get("repository", {})
     print("RepoRescue read-only inspection")

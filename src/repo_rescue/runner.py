@@ -179,7 +179,12 @@ def _trusted_pytest_command(
             "_rr_hard_exit = os._exit",
             "sys.argv[:] = [sys.argv[0]]",
             "sys.path[:0] = _rr_paths",
-            "_rr_exit = int(_rr_pytest_main([*_rr_args, '--junitxml=' + _rr_xml]))",
+            # Preserve the cacheprovider API for repositories that legitimately
+            # use the cache fixture, but keep its writes off the read-only checkout.
+            # The fixed path lives beside the trusted JUnit file in the isolated
+            # execution temp directory and is removed by the controller.
+            "_rr_cache = os.path.join(os.path.dirname(_rr_xml), 'repo-rescue-pytest-cache')",
+            "_rr_exit = int(_rr_pytest_main([*_rr_args, '-o', 'cache_dir=' + _rr_cache, '--junitxml=' + _rr_xml]))",
             "sys.stdout.flush()",
             "sys.stderr.flush()",
             "_rr_hard_exit(_rr_exit)",
@@ -190,6 +195,7 @@ def _trusted_pytest_command(
             "import json",
             "import os",
             "import subprocess",
+            "import shutil",
             "import sys",
             "import tempfile",
             "import xml.etree.ElementTree as ET",
@@ -197,6 +203,7 @@ def _trusted_pytest_command(
             "_rr_fd, _rr_xml = tempfile.mkstemp(prefix='repo-rescue-pytest-', suffix='.xml')",
             "os.close(_rr_fd)",
             "os.unlink(_rr_xml)",
+            "_rr_cache = os.path.join(os.path.dirname(_rr_xml), 'repo-rescue-pytest-cache')",
             "_rr_completed = 0",
             "_rr_collected = _rr_passed = _rr_failed = _rr_skipped = _rr_errors = 0",
             "_rr_exit = 3",
@@ -231,6 +238,7 @@ def _trusted_pytest_command(
             "        os.unlink(_rr_xml)",
             "    except OSError:",
             "        pass",
+            "    shutil.rmtree(_rr_cache, ignore_errors=True)",
             "raise SystemExit(_rr_exit if _rr_completed else 3)",
         ]
     )

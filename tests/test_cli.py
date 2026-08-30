@@ -1,4 +1,8 @@
-from repo_rescue.cli import _print_result, _report_exit_code, build_parser
+import io
+import json
+from contextlib import redirect_stdout
+
+from repo_rescue.cli import _print_inspection, _print_result, _report_exit_code, build_parser
 
 
 def test_cli_exposes_read_only_inspection() -> None:
@@ -31,3 +35,23 @@ def test_print_result_handles_dependency_install_failure(capsys) -> None:  # typ
     output = capsys.readouterr().out
     assert "before: exit 1" in output
     assert "after:  exit 1" in output
+
+
+def test_json_output_round_trips_repository_unicode_through_gbk_stdout() -> None:
+    payload = {
+        "repository": {"slug": "example/project", "commit": "abc"},
+        "readme_preview": "\ufeff中文说明",
+    }
+
+    for printer in (_print_inspection, _print_result):
+        encoded_output = io.BytesIO()
+        gbk_stdout = io.TextIOWrapper(encoded_output, encoding="gbk", errors="strict")
+        with redirect_stdout(gbk_stdout):
+            printer(payload, as_json=True)
+        gbk_stdout.flush()
+        output = encoded_output.getvalue().decode("gbk")
+        gbk_stdout.detach()
+
+        assert json.loads(output) == payload
+        assert "\\ufeff" in output
+        assert "\\u4e2d" in output

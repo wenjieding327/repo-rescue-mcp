@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from repo_rescue.analysis import analyze_snapshot
+from repo_rescue.analysis import _linked_nested_requirements, analyze_snapshot
 from repo_rescue.repository import RepositorySnapshot, inventory
 
 
@@ -99,6 +99,244 @@ def test_parses_nested_requirements_manifest(tmp_path: Path) -> None:
     assert result["execution_dependencies"] == []
 
 
+def test_links_nested_app_requirements_to_explicit_pytest_tree(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = backend/tests\n",
+        encoding="utf-8",
+    )
+    backend = tmp_path / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "requirements.txt").write_text("sphinx==8.2.3\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is True
+    assert result["manifests"]["docs/requirements.txt"]["selected_for_execution"] is False
+    assert result["execution_dependencies"] == ["fastapi==0.116.1"]
+    assert result["python_paths"] == ["."]
+
+
+def test_links_quoted_ini_testpath_with_spaces_without_injecting_pythonpath(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text(
+        '[pytest]\ntestpaths = "backend app/tests"\n',
+        encoding="utf-8",
+    )
+    backend = tmp_path / "backend app"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend app/requirements.txt"]["selected_for_execution"] is True
+    assert result["execution_dependencies"] == ["fastapi==0.116.1"]
+    assert result["python_paths"] == ["."]
+
+
+def test_nested_linkage_is_deterministic_for_case_colliding_requirements() -> None:
+    linked = _linked_nested_requirements(
+        {
+            "backend/requirements.txt",
+            "backend/REQUIREMENTS.TXT",
+            "backend/tests/test_api.py",
+        },
+        ["backend/tests/test_api.py"],
+        ["backend/tests"],
+    )
+
+    assert linked == {"backend/requirements.txt"}
+
+
+def test_does_not_link_unrelated_nested_requirements_to_pytest_tree(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = backend/tests\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "backend" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "requirements.txt").write_text("sphinx==8.2.3\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["docs/requirements.txt"]["selected_for_execution"] is False
+    assert result["execution_dependencies"] == []
+    assert result["python_paths"] == ["."]
+
+
+def test_does_not_link_nested_requirements_without_matching_test_files(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = backend/tests\n",
+        encoding="utf-8",
+    )
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is False
+    assert result["execution_dependencies"] == []
+    assert result["python_paths"] == ["."]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[tool.pytest]\ntestpaths = ["backend/tests"]\n',
+        '[tool.pytest.ini_options]\ntestpaths = ["backend/tests"]\n',
+    ],
+)
+def test_links_nested_requirements_from_pyproject_testpaths(
+    tmp_path: Path,
+    content: str,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(content, encoding="utf-8")
+    backend = tmp_path / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is True
+    assert result["python_paths"] == ["."]
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("pytest.toml", '[pytest]\ntestpaths = "backend/tests"\n'),
+        ("pyproject.toml", '[tool.pytest]\ntestpaths = ["backend/tests", 42]\n'),
+    ],
+)
+def test_rejects_malformed_native_toml_testpaths(
+    tmp_path: Path,
+    name: str,
+    content: str,
+) -> None:
+    (tmp_path / name).write_text(content, encoding="utf-8")
+    backend = tmp_path / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is False
+    assert result["python_paths"] == ["."]
+
+
+@pytest.mark.parametrize(
+    "pyproject_content",
+    ["[project]\nname = 'demo'\n", "[tool.pytest]\n"],
+)
+def test_skips_pyproject_without_effective_pytest_config_and_uses_tox_ini(
+    tmp_path: Path,
+    pyproject_content: str,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(pyproject_content, encoding="utf-8")
+    (tmp_path / "tox.ini").write_text("[pytest]\ntestpaths = backend/tests\n", encoding="utf-8")
+    backend = tmp_path / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is True
+    assert result["python_paths"] == ["."]
+
+
+def test_empty_pytest_ini_takes_precedence_over_pyproject_testpaths(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text("# Intentionally empty pytest config.\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest]\ntestpaths = ["backend/tests"]\n',
+        encoding="utf-8",
+    )
+    backend = tmp_path / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is False
+    assert result["python_paths"] == ["."]
+
+
+def test_empty_pyproject_ini_options_takes_precedence_over_tox_ini(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (tmp_path / "tox.ini").write_text("[pytest]\ntestpaths = backend/tests\n", encoding="utf-8")
+    backend = tmp_path / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is False
+    assert result["python_paths"] == ["."]
+
+
+@pytest.mark.parametrize(
+    ("section", "selected"),
+    [("tool:pytest", True), ("pytest", False)],
+)
+def test_only_tool_pytest_section_is_valid_in_setup_cfg(
+    tmp_path: Path,
+    section: str,
+    selected: bool,
+) -> None:
+    (tmp_path / "setup.cfg").write_text(
+        f"[{section}]\ntestpaths = backend/tests\n",
+        encoding="utf-8",
+    )
+    backend = tmp_path / "backend"
+    tests = backend / "tests"
+    tests.mkdir(parents=True)
+    (backend / "requirements.txt").write_text("fastapi==0.116.1\n", encoding="utf-8")
+    (tests / "test_api.py").write_text("def test_api(): assert True\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["manifests"]["backend/requirements.txt"]["selected_for_execution"] is selected
+    assert result["python_paths"] == ["."]
+
+
 def test_detects_root_and_singular_test_layouts(tmp_path: Path) -> None:
     (tmp_path / "test_root.py").write_text("def test_root(): assert True\n", encoding="utf-8")
     singular = tmp_path / "test"
@@ -123,6 +361,29 @@ def test_pyproject_pytest_configuration_selects_pytest(tmp_path: Path) -> None:
     result = analyze_snapshot(snapshot)
 
     assert result["suggested_verification_commands"][0] == "python -m pytest -q"
+
+
+@pytest.mark.parametrize(
+    ("content", "suggested_command"),
+    [
+        ("[tool.pytest]\n", "python -m compileall -q ."),
+        ("[tool.pytest.ini_options]\n", "python -m pytest -q"),
+        ("[tool.pytest]\naddopts = '-q'\n", "python -m pytest -q"),
+    ],
+)
+def test_pyproject_pytest_configuration_requires_an_effective_table(
+    tmp_path: Path,
+    content: str,
+    suggested_command: str,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(content, encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["suggested_verification_commands"][0] == suggested_command
 
 
 @pytest.mark.parametrize(

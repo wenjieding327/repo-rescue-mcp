@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from repo_rescue.bridge import baseline_sha256
 from repo_rescue.repository import RepositorySnapshot, inventory
 from repo_rescue.runner import _container_base, _copy_repository_tree, _reproduce_direct, _safe_dependencies
 from repo_rescue.security import SecurityError, require_execution_allowed
@@ -164,6 +165,54 @@ def test_direct_pytest_requires_trusted_completion_and_a_passed_test(tmp_path: P
     assert result["status"] == "verified"
     assert result["execution"]["pytest_attestation"]["completed"] is True
     assert result["execution"]["pytest_attestation"]["passed"] == 1
+
+
+def test_trusted_pytest_cache_chatter_cannot_change_repeated_baseline_hash(tmp_path: Path) -> None:
+    (tmp_path / "conftest.py").write_text(
+        """
+import tempfile
+import uuid
+from pathlib import Path
+
+_real_mkdtemp = tempfile.mkdtemp
+
+def _unstable_cache_mkdtemp(*args, prefix=None, dir=None, **kwargs):
+    if prefix == "pytest-cache-files-" and dir is not None and Path(dir).name == "project":
+        raise OSError(f"read-only pytest-cache-files-{uuid.uuid4().hex}")
+    return _real_mkdtemp(*args, prefix=prefix, dir=dir, **kwargs)
+
+tempfile.mkdtemp = _unstable_cache_mkdtemp
+""".lstrip(),
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_failure.py").write_text(
+        "def test_failure(cache):\n"
+        "    cache.set('repo-rescue/probe', {'available': True})\n"
+        "    assert cache.get('repo-rescue/probe', None) == {'available': True}\n"
+        "    assert False\n",
+        encoding="utf-8",
+    )
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "demo/app", "https://github.com/demo/app", "abc", total, files)
+    analysis = {"repository": {"slug": snapshot.slug}, "python_paths": ["."]}
+
+    first = _reproduce_direct(snapshot, analysis, [], "python -m pytest -q", 30, 30)
+    second = _reproduce_direct(snapshot, analysis, [], "python -m pytest -q", 30, 30)
+    first_baseline = {**first, "command": first["verification_command"]}
+    second_baseline = {**second, "command": second["verification_command"]}
+
+    assert first["status"] == second["status"] == "verification_failed"
+    assert first["execution"]["pytest_attestation"] == second["execution"]["pytest_attestation"]
+    assert first["execution"]["pytest_attestation"]["completed"] is True
+    assert first["execution"]["pytest_attestation"]["failed"] == 1
+    assert first["execution"]["pytest_attestation"]["errors"] == 0
+    assert "pytest-cache-files-" not in first["execution"]["stdout"]
+    assert "pytest-cache-files-" not in second["execution"]["stdout"]
+    assert "pytest-cache-files-" not in first["execution"]["stderr"]
+    assert "pytest-cache-files-" not in second["execution"]["stderr"]
+    assert baseline_sha256("a" * 40, first_baseline) == baseline_sha256("a" * 40, second_baseline)
 
 
 def test_direct_pytest_rejects_forced_zero_exit_without_completion(tmp_path: Path) -> None:
