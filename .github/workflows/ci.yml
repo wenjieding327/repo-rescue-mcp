@@ -53,6 +53,11 @@ jobs:
       - name: Smoke-test MCP repair and artifact retrieval
         run: python scripts/smoke_mcp.py
 
+      - name: Smoke-test Windows one-click demo
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\demo.ps1
+
   docker-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20

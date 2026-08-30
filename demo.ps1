@@ -16,8 +16,12 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     if ($LASTEXITCODE -ne 0) { throw "Unable to create the RepoRescue virtual environment." }
 }
 
-& $venvPython -c "import repo_rescue.orchestrator, packaging, pytest" *> $null
-if ($LASTEXITCODE -ne 0) {
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "SilentlyContinue"
+& $venvPython -c "import importlib.util, sys; required = ('repo_rescue', 'packaging', 'pytest'); sys.exit(0 if all(importlib.util.find_spec(name) is not None for name in required) else 1)" *> $null
+$dependencyProbeExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorActionPreference
+if ($dependencyProbeExitCode -ne 0) {
     Write-Host "Installing RepoRescue dependencies (first run only)..."
     & $venvPython -m pip install --disable-pip-version-check --no-input -q -e ".[dev]"
     if ($LASTEXITCODE -ne 0) { throw "RepoRescue dependency installation failed." }
