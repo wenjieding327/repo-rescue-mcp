@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repo-rescue-mcp"
-version = "0.4.0"
+version = "0.4.1"
 description = "Evidence-first repository inspection and sandboxed reproduction MCP server for RepoRescue."
 readme = "README.md"
 requires-python = ">=3.11"

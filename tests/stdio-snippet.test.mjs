@@ -4,12 +4,12 @@ import test from "node:test";
 import { runSequentialSnippetPair } from "../snippet-pair.mjs";
 import { createSnippetWorkerEnvironment } from "../snippet-worker-env.mjs";
 
-function runServer(messages, environment = {}) {
+function runServer(messages, environment = {}, entrypoint = "stdio-server.mjs") {
   return new Promise((resolve, reject) => {
     const childEnvironment = { ...process.env };
     delete childEnvironment.REPO_RESCUE_NODE_TOOLSET;
     Object.assign(childEnvironment, environment);
-    const child = spawn(process.execPath, ["stdio-server.mjs"], {
+    const child = spawn(process.execPath, [entrypoint], {
       cwd: new URL("..", import.meta.url),
       env: childEnvironment,
       stdio: ["pipe", "pipe", "pipe"],
@@ -109,7 +109,7 @@ test("lists and executes verified snippet rescue", async () => {
     },
   ]);
 
-  assert.equal(responses.find((response) => response.id === 1).result.serverInfo.version, "0.4.0");
+  assert.equal(responses.find((response) => response.id === 1).result.serverInfo.version, "0.4.1");
   const listed = responses.find((response) => response.id === 2).result.tools;
   assert.deepEqual(
     listed.map((tool) => tool.name),
@@ -246,6 +246,72 @@ test("platform toolset exposes exactly the hosted repair bridge and fails closed
   assert.equal(configuration.status, "configuration_required");
   assert.equal(JSON.stringify(configuration).includes("token="), false);
   const hidden = responses.find((response) => response.id === 3).result;
+  assert.equal(hidden.isError, true);
+  assert.equal(JSON.parse(hidden.content[0].text).status, "tool_unavailable");
+});
+
+test("dedicated platform entrypoint fixes reviewed non-secret configuration and only requires a token", async () => {
+  const responses = await runServer(
+    [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+      },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "start_prepare_github_repair",
+          arguments: { repo_url: "https://github.com/wenjieding327/repo-rescue-canary" },
+        },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "inspect_github_project", arguments: { repo_url: "https://github.com/pallets/click" } },
+      },
+    ],
+    {
+      REPO_RESCUE_NODE_TOOLSET: "full",
+      REPO_RESCUE_ACTIONS_REPOSITORY: "attacker/override",
+      REPO_RESCUE_ACTIONS_WORKFLOW: "other.yml",
+      REPO_RESCUE_ACTIONS_REF: "unsafe-ref",
+      REPO_RESCUE_ALLOWED_REPOS: "attacker/repository",
+      REPO_RESCUE_ACTIONS_MAX_ACTIVE: "99",
+      REPO_RESCUE_ACTIONS_STARTS_PER_MINUTE: "999",
+      REPO_RESCUE_ACTIONS_STARTS_PER_HOUR: "9999",
+      REPO_RESCUE_ACTIONS_MIN_POLL_MS: "1",
+      REPO_RESCUE_ACTIONS_RESULT_TTL_MS: "1",
+      REPO_RESCUE_ACTIONS_DISPATCH_DISCOVERY_MS: "1",
+      REPO_RESCUE_ACTIONS_MAX_RUN_MS: "1",
+      REPO_RESCUE_ACTIONS_REQUEST_TIMEOUT_MS: "1",
+      REPO_RESCUE_ACTIONS_ARTIFACT_TIMEOUT_MS: "1",
+      REPO_RESCUE_SNIPPET_WORKER_TIMEOUT_MS: "1",
+      REPO_RESCUE_GITHUB_TOKEN: "",
+    },
+    "platform-entry.mjs",
+  );
+
+  assert.equal(responses.find((response) => response.id === 1).result.serverInfo.version, "0.4.1");
+  assert.deepEqual(
+    responses.find((response) => response.id === 2).result.tools.map((tool) => tool.name),
+    [
+      "rescue_python_snippet",
+      "start_prepare_github_repair",
+      "get_repair_job",
+      "start_verify_github_patch",
+    ],
+  );
+  const configuration = JSON.parse(responses.find((response) => response.id === 3).result.content[0].text);
+  assert.equal(configuration.status, "configuration_required");
+  assert.match(configuration.message, /token/i);
+  assert.doesNotMatch(configuration.message, /REF|ALLOWED_REPOS|repository configuration/i);
+  const hidden = responses.find((response) => response.id === 4).result;
   assert.equal(hidden.isError, true);
   assert.equal(JSON.parse(hidden.content[0].text).status, "tool_unavailable");
 });
@@ -606,6 +672,7 @@ test("npm dry-run package contains only the hosted Node runtime", () => {
     "README.md",
     "actions-bridge.mjs",
     "package.json",
+    "platform-entry.mjs",
     "snippet-pair.mjs",
     "snippet-worker-env.mjs",
     "snippet-worker.mjs",
@@ -613,5 +680,6 @@ test("npm dry-run package contains only the hosted Node runtime", () => {
   ]);
   assert.equal(paths.some((path) => path.startsWith("archive/")), false);
   assert.equal(paths.includes("stdio-server.mjs"), true, "the npx bin target must be packaged");
+  assert.equal(paths.includes("platform-entry.mjs"), true, "the fixed platform bin target must be packaged");
   assert.equal(paths.includes("snippet-worker.mjs"), true, "the bin's runtime worker must be packaged");
 });

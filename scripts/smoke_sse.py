@@ -32,7 +32,7 @@ async def exercise_server(port: int) -> None:
             }
             if len(names) != 11 or names != expected:
                 raise RuntimeError("SSE transport did not expose exactly the documented 11-tool contract.")
-            if initialized.serverInfo.version != "0.4.0":
+            if initialized.serverInfo.version != "0.4.1":
                 raise RuntimeError("SSE serverInfo did not expose the RepoRescue package version.")
             print(f"SERVER={initialized.serverInfo.name}")
             print(f"VERSION={initialized.serverInfo.version}")

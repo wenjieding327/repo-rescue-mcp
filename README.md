@@ -73,9 +73,10 @@ npm install
 npm test
 npm run benchmark
 node .\stdio-server.mjs
+node .\platform-entry.mjs
 ```
 
-For compatibility the Node launcher defaults to the legacy four-tool surface, but `reproduce_python_project` never clones or executes repository code there. Set `REPO_RESCUE_NODE_TOOLSET=snippet` for snippet-only hosting. Set it to `platform` for the competition deployment; discovery then contains exactly `rescue_python_snippet`, `start_prepare_github_repair`, `get_repair_job`, and `start_verify_github_patch`, while direct calls to hidden legacy tools fail closed.
+For compatibility the default Node launcher keeps the legacy four-tool surface, but `reproduce_python_project` never clones or executes repository code there. Set `REPO_RESCUE_NODE_TOOLSET=snippet` for snippet-only hosting. The dedicated `repo-rescue-mcp-platform` bin is the competition entrypoint: it unconditionally fixes the reviewed toolset, control repository, workflow, protected ref, two-repository allow-list, rates, timeouts, and snippet budget in code. Discovery then contains exactly `rescue_python_snippet`, `start_prepare_github_repair`, `get_repair_job`, and `start_verify_github_patch`, while direct calls to hidden legacy tools fail closed.
 
 ### XFYun-hosted full repair through GitHub Actions
 
@@ -88,7 +89,7 @@ XFYun model → Node stdio start tool → GitHub workflow_dispatch
 XFYun model ← Node poll tool ← result.json + repair.patch + evidence.json + report.md
 ```
 
-Configure the hosted MCP process with administrator-owned values; none of them is accepted as a tool argument:
+Generic self-hosting can configure the standard launcher with administrator-owned values; none of them is accepted as a tool argument:
 
 ```text
 REPO_RESCUE_NODE_TOOLSET=platform
@@ -98,6 +99,8 @@ REPO_RESCUE_ACTIONS_WORKFLOW=repo-rescue-actions-bridge.yml
 REPO_RESCUE_ACTIONS_REF=<protected branch containing the reviewed workflow>
 REPO_RESCUE_ALLOWED_REPOS=wenjieding327/repo-rescue-canary,wenjieding327/repo-rescue-mcp
 ```
+
+For the XFYun competition deployment, use command `npx` with arguments `-y --package=https://github.com/wenjieding327/repo-rescue-mcp/releases/download/v0.4.1/repo-rescue-mcp-stdio-0.4.1.tgz repo-rescue-mcp-platform`, and declare only `REPO_RESCUE_GITHUB_TOKEN` as an environment variable **without a default value**. Enter that value only when the private MCP is linked to the team's APPID. Do not place a PAT in the hosting form's default-value preview. The platform entrypoint supplies and locks every reviewed non-secret repository, workflow, allow-list, rate-limit, timeout, and toolset value; it still fails closed with `configuration_required` until the link injects a token. The explicit bin name is mandatory because the package also contains the compatibility launcher.
 
 The fine-grained token is restricted to the one bridge repository with **Actions read/write**; RepoRescue does not need Contents, Workflows, Administration, or a model API key on that token. The Node and workflow allow-lists must be identical. The trusted workflow has its own fixed allow-list, builds `repo-rescue-python:3.11`, clears `GITHUB_TOKEN`/`GH_TOKEN` for the controller step, and never adds a credential to the untrusted Docker container.
 
