@@ -105,6 +105,8 @@ Dispatch payloads are gzip+base64 but are not trusted: both sides enforce 55,000
 
 This competition bridge remains intentionally limited to reviewed **public Python repositories**. Do not put credentials, private source, personal data, or secrets in the issue text or proposed patch: workflow inputs and one-day artifacts live in the team's GitHub Actions control repository. The hosted process keeps job capabilities in memory; if that process restarts, an already-running GitHub job may finish but the old `job_id` is no longer pollable. The Agent must start a fresh prepare chain rather than reuse an orphaned commit/baseline. A commercial service should persist job mappings in a database and use a GitHub App installation token.
 
+Release operators can run `node scripts/live_actions_bridge_smoke.mjs` after setting the reviewed environment variables and a process-only `REPO_RESCUE_GITHUB_TOKEN`. The smoke performs a real prepare→verify chain against the team canary and exits non-zero unless the Docker baseline fails, the same pytest command passes after one source-only replacement, all three evidence texts are returned, and their hashes agree. Set `REPO_RESCUE_ACTIONS_EXPECTED_HEAD_SHA` to the frozen 40-character bridge commit for an additional release-ref assertion. Never put the token on the command line or in a tracked `.env` file.
+
 ### `rescue_python_snippet`
 
 Supply original code and the AI-generated candidate. Optional cases provide stdin and expected stdout. Without expected output, RepoRescue can prove only that the candidate ran; it will not label the change a verified fix.

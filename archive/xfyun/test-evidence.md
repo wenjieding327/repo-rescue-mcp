@@ -1,6 +1,6 @@
 # 测试与证据
 
-## 2026-08-30 v0.4.0 候选版（尚未重新发布）
+## 2026-08-31 v0.4.0 候选版（尚未重新发布 Agent）
 
 本节只证明当前源码候选，不代表公开星辰 Agent 已经使用这些能力。
 
@@ -31,9 +31,22 @@
 - Artifact SHA-256：`repair.patch=505f45fb9488539d62ed13c50c9df776b080bc6252be9765521e98505f4703ff`；`evidence.json=839fc2ca952dc620eb95cef799c3e3470bd8869aa726b969d75b8a9b293e2791`；`report.md=c0a7a4a3d2d0149213a38dcd5f4201800b6804c43f80da9766ccd7cf612b8622`。
 - 本次候选补丁由确定性验收脚本提供，用于证明后端异步闭环、隔离、绑定哈希和 artifact 真实可用；它**不冒充星辰模型已经在线自动生成该补丁**。
 
+### 真实 GitHub Actions bridge 闭环（团队 canary）
+
+- 控制仓库受保护 `main` workflow 提交：`27754b066969ab3cd3f0a171eeabac46f186b6c1`；Ubuntu、Windows、Docker CI run `33351933236` 全绿。
+- 团队 canary：`wenjieding327/repo-rescue-canary`，固定 commit `04c26b6ee1b10e64336efffdf130716b52be0266`。
+- 第二轮自动验收：prepare run `33352415731` → verify run `33352460409`；两次 run 都绑定同一 workflow head SHA。
+- Docker 内同一命令：`python -m pytest -q`；修改前 exit 1、2 passed / 1 failed，修改后 exit 0、3 passed / 0 failed。
+- 最终状态：`verified_repair=true`；只修改 `src/repo_rescue_canary/parser.py`，未修改测试或远端仓库。
+- baseline SHA-256：`f0f1c35ddea53456e57f98e064e8474b6edf13c3d17d7f3be9bef462986de9e2`；patch SHA-256：`08d04d2444bbfaa5d319343703c49c7461028b3a3f7b6eddf0a86a0973e7810a`。
+- verify artifact digest：`sha256:82e6680f69894ad542daf785393c76c724e4e0a023fe9af425ed9dcb284fec3e`；`evidence.json=6037536dcb24de9ceb2913979296e3f257ef4cadb75e2d781bec0306a5cb2a66`；`report.md=a802b990c17dc7760596ef009788db9f72d5152432434e360f131c310b7366de`。
+- 下载后的原始证据保存在复赛材料区 `RepoRescue-平台异步验收-最终/20260831-live-success-33352460409/`；失败历史与成功证据分开保留。
+- 本地管理员会话凭据只通过进程环境完成这次 live dispatch，未写入文件或日志；星辰部署仍要另建最短有效期、单控制仓库、仅 Actions read/write 的 fine-grained PAT。
+- 候选补丁由确定性 live smoke 提供，用于证明真实平台桥和 verifier；它不冒充星辰模型端到端生成补丁。星辰模型端到端证据必须在私有 MCP 绑定后另行验收。
+
 测试边界：14/14 benchmark 验证的是片段执行和判定后端，候选修复代码由测试提供，**不代表大模型面对任意片段时的自动修复成功率**。公开星辰 Agent 仍需在 v4 部署后完成同类平台端调用，才能把这项能力写成线上能力。
 
-GitHub Actions bridge 当前证明范围仍是本地 mock/runner/Docker 验收；workflow 尚未进入受保护远端 ref，也尚未用真实 PAT 完成 live dispatch。因此本节不能替代复赛发布前的真实 Actions prepare→verify、星辰私有 MCP 四工具发现和 Agent 端闭环验收。
+GitHub Actions bridge 已完成真实远端 prepare→verify；仍不能替代星辰私有 MCP 四工具发现、星辰模型生成补丁及公开 Agent 端闭环验收。
 
 ### 公开 Agent 回归发现（旧部署）
 

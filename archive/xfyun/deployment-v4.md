@@ -1,6 +1,6 @@
 # RepoRescue v4 星辰部署清单
 
-状态：**代码候选已实现，本清单尚未代表公开 Agent 已重新发布。**
+状态：**代码与真实 GitHub Actions 闭环已验收；本清单尚未代表星辰私有 MCP 已绑定或公开 Agent 已重新发布。**
 
 ## 1. 冻结源码
 
@@ -21,6 +21,7 @@
 - PAT 选择最短可用有效期，只允许可信管理员查看私有 MCP 环境变量；比赛结束或任何疑似泄漏时立即 revoke 并重新签发。Actions write 不只是 dispatch，还可能影响 runs/artifacts 和 workflow 状态，因此不能把它描述为只写入一次任务。
 - 默认最多 1 个活动 job，与 workflow 的全局单并发保持一致；每分钟 3 次、每小时 12 次新 start。不同调用者绝不共享内部 job capability。公开 Actions run 只显示独立 request correlation nonce，不显示 MCP `job_id`。verify 必须提交仍存活的 `preparation_job_id`，且 repo/commit/baseline 完全匹配；一个 preparation capability 只能消费一次，同一 verify 重试返回已启动的 verify job。POST 结果不确定时只按原 request nonce 发现 run，绝不隐式重派。普通 API 15 秒、artifact 30 秒硬超时，暂时性 429/5xx/断流保留 job 重试。
 - 冷启动后跑空列表除零、类型错误、5 用例拒绝以及隐藏工具拒绝断言。
+- 发布管理员还要设置进程级 token 和 `REPO_RESCUE_ACTIONS_EXPECTED_HEAD_SHA` 后运行 `node scripts/live_actions_bridge_smoke.mjs`；脚本必须在团队 canary 上断言 Docker、同命令 exit 1→0、pytest 2/3→3/3、唯一源文件修改及三份 artifact 正文/hash。token 不得写进命令行、仓库或 `.env`。
 
 ## 3. GitHub Actions 中的 Python v0.4（完整修复与 artifacts）
 

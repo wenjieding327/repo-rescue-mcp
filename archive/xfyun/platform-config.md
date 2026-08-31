@@ -40,12 +40,12 @@
 - toolset：`REPO_RESCUE_NODE_TOOLSET=platform`，只暴露片段验证和三个 GitHub Actions 异步仓库工具。
 - Actions 控制仓库：`wenjieding327/repo-rescue-mcp`。
 - workflow：`.github/workflows/repo-rescue-actions-bridge.yml`。
-- ref：部署时填写包含已审核 workflow 的受保护分支；不能来自用户参数，不能使用漂移且未保护的临时分支。
+- ref：`main` 已启用分支保护、线性历史、禁止强推/删除，并要求 Ubuntu、Windows、Docker 三项 CI；部署值不能来自用户参数。
 - 目标仓库 allowlist：Node 环境变量与 workflow 固定列表必须完全一致；当前比赛候选为 `wenjieding327/repo-rescue-canary`、`wenjieding327/repo-rescue-mcp`。
 - 凭据：fine-grained PAT 只授予上述控制仓库 Actions read/write；值不写入本快照。使用最短可用有效期，仅可信管理员可查看私有 MCP 环境变量；比赛结束或疑似泄漏时立即 revoke 并替换。无 token/ref/allowlist 时工具必须 fail closed。
 - 默认边界：1 个活动 job（与 workflow 的全局单并发一致）、每分钟 3 次且每小时 12 次 start、15 秒 GitHub API 超时、30 秒 artifact 超时、20 分钟 workflow、artifact 保留 1 天。
 
-此配置只有在新源码进入受保护 ref、Actions live prepare→verify 通过、私有 MCP 创建成功、Agent 四工具发现与平台端闭环通过后，才能替换上方“当前 MCP”并标为已发布。
+GitHub Actions live prepare→verify 已在受保护 `main` 的提交 `27754b066969ab3cd3f0a171eeabac46f186b6c1` 上通过；prepare run `33352415731`，verify run `33352460409`，团队 canary 同一 pytest 命令 exit 1→0。此配置仍须在私有 MCP 创建成功、Agent 四工具发现与平台端闭环通过后，才能替换上方“当前 MCP”并标为已发布。
 
 ## 可迁移资产
 
