@@ -1,0 +1,24 @@
+{
+  "name": "repo-rescue-mcp-platform",
+  "version": "0.4.1-xfyun.1",
+  "private": true,
+  "description": "Single-bin XFYun hosted launcher for the reviewed RepoRescue platform toolset.",
+  "type": "module",
+  "bin": "./platform-entry.mjs",
+  "files": [
+    "README.md",
+    "stdio-server.mjs",
+    "platform-entry.mjs",
+    "actions-bridge.mjs",
+    "snippet-pair.mjs",
+    "snippet-worker-env.mjs",
+    "snippet-worker.mjs",
+    "npm-shrinkwrap.json"
+  ],
+  "dependencies": {
+    "pyodide": "314.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

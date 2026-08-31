@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { runSequentialSnippetPair } from "../snippet-pair.mjs";
 import { createSnippetWorkerEnvironment } from "../snippet-worker-env.mjs";
@@ -682,4 +683,50 @@ test("npm dry-run package contains only the hosted Node runtime", () => {
   assert.equal(paths.includes("stdio-server.mjs"), true, "the npx bin target must be packaged");
   assert.equal(paths.includes("platform-entry.mjs"), true, "the fixed platform bin target must be packaged");
   assert.equal(paths.includes("snippet-worker.mjs"), true, "the bin's runtime worker must be packaged");
+});
+
+test("XFYun package has one default platform bin and the reviewed runtime only", () => {
+  const repositoryRoot = new URL("..", import.meta.url);
+  const rootManifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const rootLock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+  const xfyunManifest = JSON.parse(readFileSync(new URL("../package.xfyun.json", import.meta.url), "utf8"));
+  const xfyunShrinkwrap = JSON.parse(readFileSync(new URL("../npm-shrinkwrap.xfyun.json", import.meta.url), "utf8"));
+
+  assert.match(xfyunManifest.version, new RegExp(`^${rootManifest.version.replaceAll(".", "\\.")}-xfyun\\.[1-9][0-9]*$`));
+  assert.equal(xfyunManifest.bin, "./platform-entry.mjs");
+  assert.deepEqual(xfyunManifest.dependencies, rootManifest.dependencies);
+  assert.equal(xfyunShrinkwrap.name, xfyunManifest.name);
+  assert.equal(xfyunShrinkwrap.version, xfyunManifest.version);
+  assert.deepEqual(xfyunShrinkwrap.packages[""].dependencies, xfyunManifest.dependencies);
+  assert.deepEqual(xfyunShrinkwrap.packages[""].bin, { "repo-rescue-mcp-platform": "platform-entry.mjs" });
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(xfyunShrinkwrap.packages).filter(([path]) => path !== "")),
+    Object.fromEntries(Object.entries(rootLock.packages).filter(([path]) => path !== "")),
+  );
+  assert.deepEqual([...xfyunManifest.files].sort(), [
+    "README.md",
+    "actions-bridge.mjs",
+    "npm-shrinkwrap.json",
+    "platform-entry.mjs",
+    "snippet-pair.mjs",
+    "snippet-worker-env.mjs",
+    "snippet-worker.mjs",
+    "stdio-server.mjs",
+  ]);
+});
+
+test("builds and executes the actual XFYun single-bin archive", () => {
+  const repositoryRoot = new URL("..", import.meta.url);
+  const npmCli = process.env.npm_execpath;
+  assert.ok(npmCli, "run this release gate through npm test");
+  for (const script of ["pack:xfyun", "verify:xfyun"]) {
+    const result = spawnSync(process.execPath, [npmCli, "run", script], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 180_000,
+    });
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  }
 });

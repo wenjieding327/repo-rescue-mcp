@@ -4,7 +4,7 @@
 
 本节只证明当前源码候选，不代表公开星辰 Agent 已经使用这些能力。
 
-- `npm test`：41/41 通过；除 snippet 隔离/fail-closed/双 bin 入口/最小 npm 包外，20 个 GitHub Actions bridge mock 测试覆盖 2026-03-10 dispatch、私有 job ID 与公开 request nonce 分离、真实 API 的三种合法 workflow path 形态及错误 ref 拒绝、run/head/payload/artifact digest 绑定、安全 ZIP、真实 patch/evidence/report 正文、prepare capability 一次消费、并发 reservation、分钟/小时配额、严格部署 allowlist、POST 不确定态不重派、429/5xx/断流重试、请求硬超时、stale job 回收和 token 脱敏。snippet child 现在使用显式最小环境，PAT、Actions 配置、模型 key 和 `NODE_OPTIONS` 均不继承。
+- `npm test`：43/43 通过；除 snippet 隔离/fail-closed/双 bin 入口/最小 npm 包/讯飞单 bin manifest 外，还在 CI 主测试内实际构建并执行最终 tgz；20 个 GitHub Actions bridge mock 测试覆盖 2026-03-10 dispatch、私有 job ID 与公开 request nonce 分离、真实 API 的三种合法 workflow path 形态及错误 ref 拒绝、run/head/payload/artifact digest 绑定、安全 ZIP、真实 patch/evidence/report 正文、prepare capability 一次消费、并发 reservation、分钟/小时配额、严格部署 allowlist、POST 不确定态不重派、429/5xx/断流重试、请求硬超时、stale job 回收和 token 脱敏。snippet child 现在使用显式最小环境，PAT、Actions 配置、模型 key 和 `NODE_OPTIONS` 均不继承。
 - `npm run benchmark`：14/14 预期状态通过，错误成功 0。
   - 已验证修复：IndexError、ZeroDivisionError、TypeError、KeyError、SyntaxError、无限循环。
   - 正确降级或拒绝：不安全导入、错误候选、原代码本来通过、超过 4 个用例、缺少预期输出、随机状态复放、结果序列化污染、私有运行时属性逃逸。
@@ -19,6 +19,14 @@
 - 新增星辰托管 `platform` toolset：只暴露片段工具与三个 Actions 异步仓库工具。Node 不执行仓库，GitHub Ubuntu runner 构建 digest 固定的 Python 3.11 verifier 镜像并调用 Python v0.4 prepare/verify；成功 verify 的 terminal result 直接带回真实 patch、evidence JSON 和 report 正文。此路径不需要额外模型 API Key，但需要只具控制仓库 Actions read/write 的 fine-grained PAT。
 - 固定 verifier 基础镜像后重新运行 `docker build` 与 `scripts/smoke_docker.py`：`verified_repair`，修改前 exit 1、修改后 exit 0、patch 存在。
 - 低内存定向验收在 Linux Node 18、禁网、`memory.max=268435456`（256 MB）且 swap 同限容器中完成真实调用：进程退出码 0，返回 `worker_execution_strategy=sequential_fresh_children`、修改前 `IndexError`、修改后 stdout `3`、`fix_verified=true`。
+
+### 讯飞单 bin 托管适配包（平台重建前本地验收）
+
+- 适配包版本：`0.4.1-xfyun.1`；核心 MCP 版本仍为 `0.4.1`。该包只有一个默认 bin，目标命令为 `npx -y <固定 Release tgz>`，不再依赖多 bin 的 `--package + 命令名` 解析。
+- `npm run pack:xfyun` 与 `npm run verify:xfyun` 均通过；最终本地 tgz 为 `repo-rescue-mcp-platform-0.4.1-xfyun.1.tgz`，31,148 字节，SHA-256 `114cb399e57fd1cda784004e094f8a9b79be68de6ca1a97588019b63c445ac3b`。
+- 归档恰好 9 个白名单文件，包含完整 `npm-shrinkwrap.json`；传递依赖、resolved 与 integrity 必须逐项等于根 lockfile，manifest 精确键集合禁止生命周期脚本。
+- 从全新 npm cache、空工作目录经本地 HTTP URL 执行真实 `npx -y <tgz>`：`initialize` 返回核心 `0.4.1`，`tools/list` 精确四工具；宿主恶意 toolset/repo/ref/allowlist 配置被专用入口覆盖，隐藏工具返回 `tool_unavailable`，无 token 返回 `configuration_required`，非白名单在 GitHub HTTP 前拒绝，token 哨兵未出现在 stdout/stderr。
+- 以上只证明发布资产和入口在干净客户端可启动，**不代表讯飞托管已恢复或 Agent 已发布**。必须在新私有 MCP 得到持续 SSE、`event: endpoint` 和平台 `mcp_tools` 精确四项后，才能进入真实平台回归。
 
 ### 真实公开故障仓库异步闭环（部署前本地后端验收）
 
