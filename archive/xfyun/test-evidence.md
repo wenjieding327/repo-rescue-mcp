@@ -44,7 +44,7 @@
 - 下载后的原始证据保存在复赛材料区 `RepoRescue-平台异步验收-最终/20260831-live-success-33352460409/`；失败历史与成功证据分开保留。
 - 本地管理员会话凭据只通过进程环境完成这次 live dispatch，未写入文件或日志；星辰部署仍要另建最短有效期、单控制仓库、仅 Actions read/write 的 fine-grained PAT。
 - 候选补丁由确定性 live smoke 提供，用于证明真实平台桥和 verifier；它不冒充星辰模型端到端生成补丁。星辰模型端到端证据必须在私有 MCP 绑定后另行验收。
-- 运行时代码与证据冻结基线：提交 `acd2b1c01a56e1cb825dea640e742dcaba347222`；最终 CI run `33352931860` 的 Ubuntu、Windows、Docker 三项均通过。其后的纯文档完整性修订不改变 Actions bridge、workflow、Docker 或 Python verifier 运行时；最终提交包的精确源码 SHA 由外层提交清单记录。
+- 生产修复链与 live 证据的运行时基线为 `acd2b1c01a56e1cb825dea640e742dcaba347222`，CI run `33352931860` 的 Ubuntu、Windows、Docker 三项均通过。候选提交 `e11cf82f4efe00f7ee4e9f78e6e7f67fb9d47d08` 随后修正文档完整性与 CI stdio smoke 的握手时序：旧 smoke 在 initialize 应答前批量发送 `tools/list`，曾令 `main` Ubuntu run `33354597865` 偶发失败；新 smoke 按协议逐阶段等待，本机连续 20 次失败 0，分支 CI `33354930182` 与 `main` CI `33355251695` 均三项全绿。该修订不改变 Actions bridge、workflow、Docker 或 Python verifier 的生产行为；最终提交包的精确源码 SHA 由外层提交清单记录。
 
 测试边界：14/14 benchmark 验证的是片段执行和判定后端，候选修复代码由测试提供，**不代表大模型面对任意片段时的自动修复成功率**。公开星辰 Agent 仍需在 v4 部署后完成同类平台端调用，才能把这项能力写成线上能力。
 

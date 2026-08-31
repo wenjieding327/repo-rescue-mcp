@@ -45,7 +45,7 @@
 - 凭据：fine-grained PAT 只授予上述控制仓库 Actions read/write；值不写入本快照。使用最短可用有效期，仅可信管理员可查看私有 MCP 环境变量；比赛结束或疑似泄漏时立即 revoke 并替换。无 token/ref/allowlist 时工具必须 fail closed。
 - 默认边界：1 个活动 job（与 workflow 的全局单并发一致）、每分钟 3 次且每小时 12 次 start、15 秒 GitHub API 超时、30 秒 artifact 超时、20 分钟 workflow、artifact 保留 1 天。
 
-GitHub Actions live prepare→verify 已在受保护 `main` 的 workflow 提交 `27754b066969ab3cd3f0a171eeabac46f186b6c1` 上通过；第一轮 prepare `33352299438` → verify `33352330215`，第二轮 prepare `33352415731` → verify `33352460409`，团队 canary 的同一 pytest 命令均 exit 1→0。运行时冻结基线 `acd2b1c01a56e1cb825dea640e742dcaba347222` 的最终 CI `33352931860` 亦为 Ubuntu、Windows、Docker 全绿。此配置仍须在私有 MCP 创建成功、Agent 四工具发现与平台端闭环通过后，才能替换上方“当前 MCP”并标为已发布。
+GitHub Actions live prepare→verify 已在受保护 `main` 的 workflow 提交 `27754b066969ab3cd3f0a171eeabac46f186b6c1` 上通过；第一轮 prepare `33352299438` → verify `33352330215`，第二轮 prepare `33352415731` → verify `33352460409`，团队 canary 的同一 pytest 命令均 exit 1→0。生产修复链的运行时基线为 `acd2b1c01a56e1cb825dea640e742dcaba347222`，CI `33352931860` 三项全绿；随后候选提交 `e11cf82f4efe00f7ee4e9f78e6e7f67fb9d47d08` 只修正证据文档与 CI stdio smoke 的协议握手，不改变 Actions bridge、workflow、Docker 或 Python verifier，且 `main` CI `33355251695` 的 Ubuntu、Windows、Docker 再次全绿。此配置仍须在私有 MCP 创建成功、Agent 四工具发现与平台端闭环通过后，才能替换上方“当前 MCP”并标为已发布。
 
 ## 可迁移资产
 
