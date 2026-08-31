@@ -6,17 +6,18 @@
 
 - 完整测试必须通过：`npm test`、`npm run benchmark`、`python -m pytest`、`python scripts/smoke_stdio.py`、`python scripts/smoke_sse.py`、`python scripts/smoke_mcp.py`；具备 Docker 的发布主机还必须运行 `python scripts/smoke_docker.py`。
 - 推送后记录唯一 commit SHA，MCP 源码包必须固定到该 SHA，不能使用会漂移的 branch ZIP。
-- 星辰私有 MCP 英文名固定为 `repo-rescue-actions-bridge-v4`，包版本为 `0.4.0`。
+- 星辰私有 MCP 英文名固定为 `repo-rescue-actions-bridge-v4`，包版本为 `0.4.1`。
 
 ## 2. Node v4 MCP（片段执行 + GitHub Actions 仓库桥）
 
-- 入口：`node stdio-server.mjs`。
+- 通用兼容入口：`node stdio-server.mjs`；复赛托管入口：`node platform-entry.mjs`，发布包中必须通过显式 bin `repo-rescue-mcp-platform` 启动。
 - 服务侧默认兼容模式必须发现 4 个工具：`rescue_python_snippet`、`inspect_github_project`、`reproduce_python_project`、`windows_environment_probe`。
-- 星辰复赛托管实例必须设置 `REPO_RESCUE_NODE_TOOLSET=platform`，此时 `tools/list` 必须恰好发现 `rescue_python_snippet`、`start_prepare_github_repair`、`get_repair_job`、`start_verify_github_patch`；直接调用 legacy/full 隐藏工具必须返回 `tool_unavailable`。
+- 星辰复赛托管实例必须运行专用 `repo-rescue-mcp-platform` bin。该入口在代码中强制 `REPO_RESCUE_NODE_TOOLSET=platform`，并固定控制仓库、workflow、ref、白名单、速率限制与全部请求/轮询/运行/artifact/片段超时；`tools/list` 必须恰好发现 `rescue_python_snippet`、`start_prepare_github_repair`、`get_repair_job`、`start_verify_github_patch`，直接调用 legacy/full 隐藏工具必须返回 `tool_unavailable`。
 - 256 MB 托管实例中，原代码与候选代码默认由两个全新 Pyodide 子进程**顺序**执行，任何时刻最多驻留一个 Pyodide worker；两次运行仍完全隔离，且单 worker 的 6000 ms 墙钟、192 MB V8 heap、协议与输出上限均不放宽。不需要新增环境变量，也不要把两次 worker 改回并行。上层 MCP 工具调用超时必须至少容纳两份单 worker 预算与冷启动余量（默认约 12 秒加冷启动开销）。
 - Node 宿主仍不得克隆或执行仓库；三个仓库工具只把有界请求 dispatch 到受保护 GitHub workflow，并轮询该次 run 的绑定 artifact。
-- npm 包必须由 `package.json.files` 只包含 `stdio-server.mjs`、`actions-bridge.mjs` 和 snippet worker 运行时，不得上传 `archive/`、测试、复赛材料或 Python 后端。
-- 托管环境必须配置 `REPO_RESCUE_GITHUB_TOKEN`（只给控制仓库 Actions read/write 的 fine-grained token）、固定 `REPO_RESCUE_ACTIONS_REPOSITORY=wenjieding327/repo-rescue-mcp`、`REPO_RESCUE_ACTIONS_WORKFLOW=repo-rescue-actions-bridge.yml`、受保护 `REPO_RESCUE_ACTIONS_REF`，以及与 workflow 完全一致的 `REPO_RESCUE_ALLOWED_REPOS`。漏任一关键配置必须 `configuration_required`，不得发 HTTP。
+- npm 包必须由 `package.json.files` 只包含 `README.md`、`package.json`、`stdio-server.mjs`、`platform-entry.mjs`、`actions-bridge.mjs`、`snippet-pair.mjs`、`snippet-worker-env.mjs`、`snippet-worker.mjs`，不得上传 `archive/`、测试、复赛材料或 Python 后端。
+- 星辰命令固定为 `npx`，参数必须显式写成 `-y --package=https://github.com/wenjieding327/repo-rescue-mcp/releases/download/v0.4.1/repo-rescue-mcp-stdio-0.4.1.tgz repo-rescue-mcp-platform`。多 bin 包不得只给压缩包 URL，否则可能启动兼容 full 入口而不是复赛入口。
+- 讯飞托管表单只声明 `REPO_RESCUE_GITHUB_TOKEN`，选择“有 env 参数不提供默认值”，并在私有 MCP 绑定团队 APPID 时才输入令牌。不得把 PAT 填入托管表单的默认值或配置预览。其余非敏感仓库、workflow、ref、白名单、限额及超时配置全部由专用入口强制；缺少 token 必须 `configuration_required`，不得发 HTTP。
 - 该托管 MCP 保持**私有**，不发布 MCP 广场；复赛对外入口是绑定它并完成平台验收后的 RepoRescue Agent。PAT 只能保存在私有 MCP 环境变量中，不能写进 Prompt、workflow input、仓库文件、截图或回答。
 - PAT 选择最短可用有效期，只允许可信管理员查看私有 MCP 环境变量；比赛结束或任何疑似泄漏时立即 revoke 并重新签发。Actions write 不只是 dispatch，还可能影响 runs/artifacts 和 workflow 状态，因此不能把它描述为只写入一次任务。
 - 默认最多 1 个活动 job，与 workflow 的全局单并发保持一致；每分钟 3 次、每小时 12 次新 start。不同调用者绝不共享内部 job capability。公开 Actions run 只显示独立 request correlation nonce，不显示 MCP `job_id`。verify 必须提交仍存活的 `preparation_job_id`，且 repo/commit/baseline 完全匹配；一个 preparation capability 只能消费一次，同一 verify 重试返回已启动的 verify job。POST 结果不确定时只按原 request nonce 发现 run，绝不隐式重派。普通 API 15 秒、artifact 30 秒硬超时，暂时性 429/5xx/断流保留 job 重试。

@@ -125,7 +125,7 @@ def main() -> None:
     }
     if len(names) != 11 or set(names) != expected_tools:
         raise RuntimeError("RepoRescue stdio must expose exactly the documented 11-tool Python contract.")
-    if initialization["result"]["serverInfo"].get("version") != "0.4.0":
+    if initialization["result"]["serverInfo"].get("version") != "0.4.1":
         raise RuntimeError("MCP serverInfo did not expose the RepoRescue package version.")
     verify_tool = next(tool for tool in listed_tools if tool["name"] == "verify_github_patch")
     schema = verify_tool["inputSchema"]

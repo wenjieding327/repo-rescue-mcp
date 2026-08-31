@@ -764,7 +764,7 @@ input.on("line", async (line) => {
   try {
     let result;
     if (request.method === "initialize") {
-      result = { protocolVersion: request.params?.protocolVersion || "2025-03-26", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "repo-rescue-mcp", version: "0.4.0" } };
+      result = { protocolVersion: request.params?.protocolVersion || "2025-03-26", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "repo-rescue-mcp", version: "0.4.1" } };
     } else if (request.method === "ping") {
       result = {};
     } else if (request.method === "tools/list") {

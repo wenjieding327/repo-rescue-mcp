@@ -1,15 +1,15 @@
 # 测试与证据
 
-## 2026-08-31 v0.4.0 候选版（尚未重新发布 Agent）
+## 2026-08-31 v0.4.1 候选版（尚未重新发布 Agent）
 
 本节只证明当前源码候选，不代表公开星辰 Agent 已经使用这些能力。
 
-- `npm test`：40/40 通过；除 snippet 隔离/fail-closed/最小 npm 包外，新增 20 个 GitHub Actions bridge mock 测试，覆盖 2026-03-10 dispatch、私有 job ID 与公开 request nonce 分离、真实 API 的三种合法 workflow path 形态及错误 ref 拒绝、run/head/payload/artifact digest 绑定、安全 ZIP、真实 patch/evidence/report 正文、prepare capability 一次消费、并发 reservation、分钟/小时配额、严格部署 allowlist、POST 不确定态不重派、429/5xx/断流重试、请求硬超时、stale job 回收和 token 脱敏。snippet child 现在使用显式最小环境，PAT、Actions 配置、模型 key 和 `NODE_OPTIONS` 均不继承。
+- `npm test`：41/41 通过；除 snippet 隔离/fail-closed/双 bin 入口/最小 npm 包外，20 个 GitHub Actions bridge mock 测试覆盖 2026-03-10 dispatch、私有 job ID 与公开 request nonce 分离、真实 API 的三种合法 workflow path 形态及错误 ref 拒绝、run/head/payload/artifact digest 绑定、安全 ZIP、真实 patch/evidence/report 正文、prepare capability 一次消费、并发 reservation、分钟/小时配额、严格部署 allowlist、POST 不确定态不重派、429/5xx/断流重试、请求硬超时、stale job 回收和 token 脱敏。snippet child 现在使用显式最小环境，PAT、Actions 配置、模型 key 和 `NODE_OPTIONS` 均不继承。
 - `npm run benchmark`：14/14 预期状态通过，错误成功 0。
   - 已验证修复：IndexError、ZeroDivisionError、TypeError、KeyError、SyntaxError、无限循环。
   - 正确降级或拒绝：不安全导入、错误候选、原代码本来通过、超过 4 个用例、缺少预期输出、随机状态复放、结果序列化污染、私有运行时属性逃逸。
 - `.venv\Scripts\python.exe -m pytest`：155/155 通过。其中 12 项直接覆盖 Actions runner 的 strict base64/gzip、55000 字节双边界、固定 allowlist、mode/request/run/head 绑定、最多 3×12000 字符补丁、token 清除、强制 Docker、成功/失败 result artifact，以及 artifact 三件套/超限清理；另有 Docker 探测超时回归，确保 `docker info` 卡住时返回可控不可用而不是 traceback。
-- Python MCP stdio、Streamable HTTP、真实 SSE 握手均通过：发现 11 个工具，`serverInfo.version=0.4.0`；内置 Demo 为 `verified_repair`；`get_repair_artifact` 可读取完整 patch。
+- Python MCP stdio、Streamable HTTP、真实 SSE 握手均通过：发现 11 个工具，`serverInfo.version=0.4.1`；内置 Demo 为 `verified_repair`；`get_repair_artifact` 可读取完整 patch。
 - 新增无独立模型 API Key 的短调用路径：`start_prepare_github_repair` → `get_repair_job` → 星辰模型生成有界完整文件替换 → `start_verify_github_patch` → `get_repair_job` 同命令复验。任务 ID 256 bit、单 worker、活动队列与结果缓存分别限额，长轮询不阻塞 ASGI 事件循环。
 - 依赖安装失败现在可进入 Repair Agent；修复现有依赖清单后重新分析并在新隔离验证中重新安装。若基线 pytest 因安装失败而没有可比较覆盖，修后即使通过也降级为 `repair_tests_passed_uncompared`，不标为 `verified_repair`。
 - prepare/verify 现在同时绑定 commit 与 baseline SHA；默认禁止新增依赖发行包名，关闭 pytest 插件自动加载，并由可信父控制器解析子进程 JUnit，拒绝强制退出、全跳过、测试收集缩减与仓库代码篡改验证计数。
@@ -42,7 +42,7 @@
 - baseline SHA-256：`f0f1c35ddea53456e57f98e064e8474b6edf13c3d17d7f3be9bef462986de9e2`；patch SHA-256：`08d04d2444bbfaa5d319343703c49c7461028b3a3f7b6eddf0a86a0973e7810a`。
 - verify artifact digest：`sha256:82e6680f69894ad542daf785393c76c724e4e0a023fe9af425ed9dcb284fec3e`；`evidence.json=6037536dcb24de9ceb2913979296e3f257ef4cadb75e2d781bec0306a5cb2a66`；`report.md=a802b990c17dc7760596ef009788db9f72d5152432434e360f131c310b7366de`。
 - 下载后的原始证据保存在复赛材料区 `RepoRescue-平台异步验收-最终/20260831-live-success-33352460409/`；失败历史与成功证据分开保留。
-- 本地管理员会话凭据只通过进程环境完成这次 live dispatch，未写入文件或日志；星辰部署仍要另建最短有效期、单控制仓库、仅 Actions read/write 的 fine-grained PAT。
+- 本地管理员会话凭据只通过进程环境完成这次 live dispatch，未写入文件或日志；星辰部署另建最短有效期、单控制仓库、仅 Actions read/write 的 fine-grained PAT，托管表单不提供默认值，只在私有 MCP 绑定团队 APPID 时注入。
 - 候选补丁由确定性 live smoke 提供，用于证明真实平台桥和 verifier；它不冒充星辰模型端到端生成补丁。星辰模型端到端证据必须在私有 MCP 绑定后另行验收。
 - 生产修复链与 live 证据的运行时基线为 `acd2b1c01a56e1cb825dea640e742dcaba347222`，CI run `33352931860` 的 Ubuntu、Windows、Docker 三项均通过。候选提交 `e11cf82f4efe00f7ee4e9f78e6e7f67fb9d47d08` 随后修正文档完整性与 CI stdio smoke 的握手时序：旧 smoke 在 initialize 应答前批量发送 `tools/list`，曾令 `main` Ubuntu run `33354597865` 偶发失败；新 smoke 按协议逐阶段等待，本机连续 20 次失败 0，分支 CI `33354930182` 与 `main` CI `33355251695` 均三项全绿。该修订不改变 Actions bridge、workflow、Docker 或 Python verifier 的生产行为；最终提交包的精确源码 SHA 由外层提交清单记录。
 
@@ -58,7 +58,7 @@ GitHub Actions bridge 已完成真实远端 prepare→verify；仍不能替代�
 - 明确要求 `rescue_python_snippet`：Agent 回答当前工具列表不包含它。
 - `https://github.com/psf/requests`：返回通用“请刷新再试”，没有结构化 unsupported 或证据。
 
-因此旧公开版本不得继续宣称“任意代码/仓库可真实运行”。只有完成 `deployment-v4.md` 的发布后验收，才能把 v0.4.0 能力改写为线上能力。
+因此旧公开版本不得继续宣称“任意代码/仓库可真实运行”。只有完成 `deployment-v4.md` 的发布后验收，才能把 v0.4.1 能力改写为线上能力。
 
 ## v1 已发布归档：本地自动化测试
 
