@@ -6,7 +6,7 @@
 
 - 完整测试必须通过：`npm test`、`npm run benchmark`、`python -m pytest`、`python scripts/smoke_stdio.py`、`python scripts/smoke_sse.py`、`python scripts/smoke_mcp.py`；具备 Docker 的发布主机还必须运行 `python scripts/smoke_docker.py`。
 - 推送后记录唯一 commit SHA，MCP 源码包必须固定到该 SHA，不能使用会漂移的 branch ZIP。
-- Node 服务构建标识应为 `repo-rescue-verified-code-20260830-v4`，包版本为 `0.4.0`。
+- 星辰私有 MCP 英文名固定为 `repo-rescue-actions-bridge-v4`，包版本为 `0.4.0`。
 
 ## 2. Node v4 MCP（片段执行 + GitHub Actions 仓库桥）
 
@@ -44,8 +44,8 @@
   - `REPO_RESCUE_ALLOWED_REPOS`：仅列复赛已验收公开仓库。
   - `REPO_RESCUE_ALLOWED_ADDITIONAL_DEPENDENCIES`：默认留空；只有管理员审核确认修复确实需要新增发行包名时才逐个加入。
   - `REPO_RESCUE_ARTIFACTS_DIR`：平台可写、会定期清理的目录。
-  - `REPO_RESCUE_JOB_MAX_JOBS=16`：queued/running 的活动任务上限；已完成结果不会占用该队列槽。
-  - `REPO_RESCUE_JOB_MAX_RESULTS=64`、`REPO_RESCUE_JOB_TTL_SECONDS=900`：进程内完成结果的数量与存活时间上限，超量先淘汰最旧结果。
+  - `REPO_RESCUE_JOB_MAX_JOBS=16`：全部未过期 job 记录上限，包含 queued、running 与 completed；一次 prepare→verify 闭环占两条记录，因此默认 TTL 窗口内最多约 8 个完整闭环。
+  - `REPO_RESCUE_JOB_MAX_RESULTS=64`、`REPO_RESCUE_JOB_TTL_SECONDS=900`：进程内完成结果的独立数量上限与存活时间，超量先淘汰最旧结果；两项限制都不能替代生产数据库/队列。
   - `REPO_RESCUE_JOB_MAX_LONG_POLLS=8`：长轮询并发上限；等待在线程中完成，不能阻塞 ASGI 事件循环。
   - 本地/独立主机默认 Docker；只有整个 MCP 已处于一次性资源受限容器中时，才设置 `REPO_RESCUE_EXECUTION_BACKEND=direct`。
   - 无 API Key 路径不设置 `OPENAI_API_KEY`，由星辰模型调用异步 prepare/verify job 工具。
@@ -58,6 +58,7 @@
 
 - 只绑定一个 Node v4 `platform` MCP，避免同名工具冲突和外部 Docker 服务依赖。
 - 将 Agent instruction/reasoning 更新为 `prompts-v4.md`。
+- 将 ReACT 最大循环轮数从历史值 10 调整为 16，并实测两阶段 start + 多次 20 秒轮询在该预算内完成；不得通过重复 start 节省轮数。
 - 仓库任务固定走 `start_prepare_github_repair` → `get_repair_job` → `start_verify_github_patch` → `get_repair_job`；轮询不得重复启动任务。
 - Python 的同步 prepare/verify 保留给本地/长调用宿主；公开星辰只使用 Node bridge 的三个异步仓库工具。
 - 对外文案在公开验收前写“受限公开 Python 仓库 Beta”，不能写“任意 GitHub”。
@@ -66,8 +67,8 @@
 
 - `prompts-v4.md` 中适用于公开 Agent 的全部片段与仓库用例都要重新跑通；Node 直连烟测在服务侧单独执行。
 - 片段至少 5/5 正常修复、安全拒绝 2/2、错误成功 0。
-- 内置 Demo 连续 3 次成功，patch 能通过 `get_repair_artifact` 读取。
-- 至少 1 个固定提交的公开故障仓库连续 2 次完成异步 prepare → verify 闭环；正式提交前再补 1 个团队控制仓库，避免把第三方 canary 误写成生产故障。
+- 本地 Python 后端发布门槛：`run_interview_demo` 连续 3 次成功，patch 能通过 `get_repair_artifact` 读取；这两个工具不在公开 `platform` 工具面，不能写成公开 Agent 调用步骤。
+- 团队控制的固定 canary 至少连续 2 次完成异步 prepare → verify 闭环；当前验收对应 `33352299438 → 33352330215` 与 `33352415731 → 33352460409`。第三方 canary 只能列为历史证据，不能替代团队控制仓库。
 - GitHub Actions 的 Docker smoke 必须完成 baseline 失败 → 确定性 Repair Agent 修改 → 相同 pytest 命令通过；这只验收隔离编排，不替代真实模型/外部仓库证据。
 - 保存页面截图、原始回答、commit、运行时间和 artifact SHA；失败记录也必须保留。
 

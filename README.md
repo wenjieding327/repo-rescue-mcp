@@ -1,6 +1,6 @@
 # RepoRescue — Verified Code Rescue
 
-**Paste broken Python code or a public GitHub repository. RepoRescue explains it, generates a minimal repair, runs before-and-after verification, and reports exactly what the evidence proves.**
+**Paste broken Python code or a reviewed allow-listed public Python GitHub repository. RepoRescue explains it, generates a minimal repair, runs before-and-after verification, and reports exactly what the evidence proves.**
 
 RepoRescue is not another “maybe try this” coding chatbot. Its differentiator is a verification protocol:
 
@@ -13,7 +13,7 @@ The product serves beginners through one low-friction entry point while keeping 
 | Mode | User provides | RepoRescue returns |
 |---|---|---|
 | Quick code rescue | A snippet, function, error, or assignment | Plain-language cause, repaired code, before/after run evidence |
-| Project rescue | A public GitHub repository and optional issue description | Commit-pinned failure, generated source repair, same-command verification, patch and evidence bundle |
+| Project rescue | A reviewed allow-listed public Python GitHub repository and optional issue description | Commit-pinned failure, generated source repair, same-command verification, patch and evidence bundle |
 
 Direct file/notebook upload is a planned mode, not a current backend capability.
 
@@ -28,7 +28,7 @@ Direct file/notebook upload is a planned mode, not a current backend capability.
 ## Backend repair architecture
 
 ```text
-GitHub URL + issue
+reviewed allow-listed public Python GitHub URL + issue
         │
         ▼
 commit-pinned temporary checkout
@@ -50,7 +50,7 @@ same-command verifier ── retries up to the configured attempt limit
 repair.patch + evidence.json + report.md
 ```
 
-## Interview demo — one command, no API key
+## Interview demo — one command, no model API key or Docker
 
 From PowerShell in the repository root:
 
@@ -62,7 +62,7 @@ On Windows, `demo.cmd` can also be double-clicked.
 
 The script creates or reuses `.venv`, installs the project, and runs a seeded broken calculator through the real orchestration path. The original test exits `1`, the Repair Agent changes `calculator.py`, the exact same command exits `0`, and a timestamped evidence bundle is written under `artifacts/`.
 
-This deterministic demo is intentionally limited to the bundled trusted project, so the repair run itself needs neither Docker, network access nor model credentials. A first-time setup may still need package access to install the Python dependencies. Public GitHub repositories use one of the isolated paths below.
+This deterministic demo is intentionally limited to the bundled trusted project, so the repair run itself needs neither Docker, network access nor model credentials. A first-time setup may still need package access to install the Python dependencies. Reviewed allow-listed public Python GitHub repositories use one of the isolated paths below.
 
 ## Quick start: hosted Node MCP
 
@@ -151,7 +151,7 @@ The root `Dockerfile` packages the MCP API and trusted interview Demo; it does n
 
 ### API-key-free host-agent repair
 
-An agent platform such as XFYun can use its own model as the Repair Agent, so the RepoRescue backend does not need a separate model API key:
+An agent platform such as XFYun can use its own model as the Repair Agent, so the user and RepoRescue repair backend do not need a separate model API key. The private platform administrator still supplies the least-privilege GitHub Actions credential described above:
 
 ```text
 prepare_github_repair(repo_url)
@@ -221,7 +221,7 @@ Returns a copy-paste PowerShell probe. It never claims to read a user's computer
 - **P4:** documented official demo reproduced.
 - **P5:** paper metric reproduced under a stated dataset, configuration, seed, and hardware boundary.
 
-The archived competition deployment has evidence for **S2** on safe Python snippets and **P3 for the named Click core smoke scope**. The source tree also has a deterministic 14/14 snippet backend benchmark and a no-key host-agent repository path. These source capabilities must be redeployed and retested on the public Agent before they are described as live. None of them claims P4 or P5.
+The archived competition deployment has evidence for **S2** on safe Python snippets and **P3 for the named Click core smoke scope**. The source tree also has a deterministic 14/14 snippet backend benchmark and a host-agent path that needs no separate model API key. The private platform administrator still configures a least-privilege GitHub Actions credential. These source capabilities must be redeployed and retested on the public Agent before they are described as live. None of them claims P4 or P5.
 
 ## Verified Code Rescue Skill
 
@@ -241,7 +241,7 @@ This Skill is intentionally not a generic coding prompt. Its reusable value is t
 
 ## Portfolio summary
 
-> Built a backend Repair Agent that accepts a public GitHub repository, creates a commit-pinned isolated checkout, reproduces a real failure, generates and safely applies a bounded source repair, reruns the exact same verifier, and emits a patch plus machine-readable and human-readable evidence. Exposed the loop through CLI and MCP while preventing test tampering and unverified success claims.
+> Built a backend Repair Agent that accepts a reviewed allow-listed public Python GitHub repository, creates a commit-pinned isolated checkout, reproduces a real failure, generates and safely applies a bounded source repair, reruns the exact same verifier, and emits a patch plus machine-readable and human-readable evidence. Exposed the loop through CLI and MCP while preventing test tampering and unverified success claims.
 
 ## Roadmap
 

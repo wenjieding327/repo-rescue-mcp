@@ -15,14 +15,14 @@
 - prepare/verify 现在同时绑定 commit 与 baseline SHA；默认禁止新增依赖发行包名，关闭 pytest 插件自动加载，并由可信父控制器解析子进程 JUnit，拒绝强制退出、全跳过、测试收集缩减与仓库代码篡改验证计数。
 - Repair Agent 只能修改初始 inventory 中的精确路径；Windows 8.3/大小写别名以及测试目录中的 helper/fixture 均不能绕过测试保护。
 - Git 在 checkout 前先用 tree 元数据执行 5000 文件/50 MB 预检；Linux Docker 映射宿主 uid:gid，避免 bind mount 留下 root 文件；服务错误响应不暴露本机路径或底层 stderr。
-- Node v4 只承担片段执行；原代码与候选代码分别在全新的 Pyodide 子进程中顺序运行，任何时刻最多驻留一个 Pyodide worker，并受原有硬墙钟、V8 heap、协议与输出上限约束。精确调度测试会记录 start/finish 顺序并断言最大并发数为 1；Node `reproduce_python_project` 兼容入口在 clone 或宿主 Python 之前固定返回 `repository_execution_disabled`；所有仓库复现与修复统一路由到 Python v0.4 MCP。
+- Node v4 不直接执行仓库代码：片段由全新的 Pyodide 子进程顺序执行，任何时刻最多驻留一个 worker，并受原有硬墙钟、V8 heap、协议与输出上限约束；`platform` 模式的仓库工具只桥接受保护 GitHub Actions，再由 Python v0.4 + Docker 完成 prepare/verify。Node `reproduce_python_project` 兼容入口在 clone 或宿主 Python 之前固定返回 `repository_execution_disabled`。
 - 新增星辰托管 `platform` toolset：只暴露片段工具与三个 Actions 异步仓库工具。Node 不执行仓库，GitHub Ubuntu runner 构建 digest 固定的 Python 3.11 verifier 镜像并调用 Python v0.4 prepare/verify；成功 verify 的 terminal result 直接带回真实 patch、evidence JSON 和 report 正文。此路径不需要额外模型 API Key，但需要只具控制仓库 Actions read/write 的 fine-grained PAT。
 - 固定 verifier 基础镜像后重新运行 `docker build` 与 `scripts/smoke_docker.py`：`verified_repair`，修改前 exit 1、修改后 exit 0、patch 存在。
 - 低内存定向验收在 Linux Node 18、禁网、`memory.max=268435456`（256 MB）且 swap 同限容器中完成真实调用：进程退出码 0，返回 `worker_execution_strategy=sequential_fresh_children`、修改前 `IndexError`、修改后 stdout `3`、`fix_verified=true`。
 
 ### 真实公开故障仓库异步闭环（部署前本地后端验收）
 
-- 历史第三方 canary 仓库：`pserrano95/repojanitor-canary`（只保留既有本地验收证据；当前部署 allowlist 已改为团队仓库 `wenjieding327/repo-rescue-canary`，等待 live Actions 后另行追加证据。）
+- 历史第三方 canary 仓库：`pserrano95/repojanitor-canary`（只保留既有本地验收证据；当前部署 allowlist 已改为团队仓库 `wenjieding327/repo-rescue-canary`，其 live Actions 证据已追加在下节。）
 - 固定 commit：`7653fba05df872da0609d20e4a007ccb0eac5c93`
 - 运行路径：异步 prepare job → 轮询终态 → 有界完整文件补丁 → 异步 verify job → 轮询终态。
 - Docker 内相同命令：`python -m pytest -q`
@@ -35,6 +35,7 @@
 
 - 控制仓库受保护 `main` workflow 提交：`27754b066969ab3cd3f0a171eeabac46f186b6c1`；Ubuntu、Windows、Docker CI run `33351933236` 全绿。
 - 团队 canary：`wenjieding327/repo-rescue-canary`，固定 commit `04c26b6ee1b10e64336efffdf130716b52be0266`。
+- 第一轮人工核对：prepare run `33352299438` → verify run `33352330215`；GitHub 两次 run 均成功，下载 artifact 复核为 `verified_repair=true`。早期本地包装脚本曾因读取错误嵌套字段误报，原始 artifact 与随后修正的自动断言均确认闭环成功。
 - 第二轮自动验收：prepare run `33352415731` → verify run `33352460409`；两次 run 都绑定同一 workflow head SHA。
 - Docker 内同一命令：`python -m pytest -q`；修改前 exit 1、2 passed / 1 failed，修改后 exit 0、3 passed / 0 failed。
 - 最终状态：`verified_repair=true`；只修改 `src/repo_rescue_canary/parser.py`，未修改测试或远端仓库。
@@ -43,6 +44,7 @@
 - 下载后的原始证据保存在复赛材料区 `RepoRescue-平台异步验收-最终/20260831-live-success-33352460409/`；失败历史与成功证据分开保留。
 - 本地管理员会话凭据只通过进程环境完成这次 live dispatch，未写入文件或日志；星辰部署仍要另建最短有效期、单控制仓库、仅 Actions read/write 的 fine-grained PAT。
 - 候选补丁由确定性 live smoke 提供，用于证明真实平台桥和 verifier；它不冒充星辰模型端到端生成补丁。星辰模型端到端证据必须在私有 MCP 绑定后另行验收。
+- 运行时代码与证据冻结基线：提交 `acd2b1c01a56e1cb825dea640e742dcaba347222`；最终 CI run `33352931860` 的 Ubuntu、Windows、Docker 三项均通过。其后的纯文档完整性修订不改变 Actions bridge、workflow、Docker 或 Python verifier 运行时；最终提交包的精确源码 SHA 由外层提交清单记录。
 
 测试边界：14/14 benchmark 验证的是片段执行和判定后端，候选修复代码由测试提供，**不代表大模型面对任意片段时的自动修复成功率**。公开星辰 Agent 仍需在 v4 部署后完成同类平台端调用，才能把这项能力写成线上能力。
 
