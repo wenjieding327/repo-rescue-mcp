@@ -13,6 +13,7 @@
 - 入口：`node stdio-server.mjs`。
 - 服务侧默认兼容模式必须发现 4 个工具：`rescue_python_snippet`、`inspect_github_project`、`reproduce_python_project`、`windows_environment_probe`。
 - 星辰托管实例必须设置 `REPO_RESCUE_NODE_TOOLSET=snippet`，此时 `tools/list` 只能发现 `rescue_python_snippet`，直接调用其他三个工具必须返回 `tool_unavailable`。
+- 256 MB 托管实例中，原代码与候选代码默认由两个全新 Pyodide 子进程**顺序**执行，任何时刻最多驻留一个 Pyodide worker；两次运行仍完全隔离，且单 worker 的 6000 ms 墙钟、192 MB V8 heap、协议与输出上限均不放宽。不需要新增环境变量，也不要把两次 worker 改回并行。上层 MCP 工具调用超时必须至少容纳两份单 worker 预算与冷启动余量（默认约 12 秒加冷启动开销）。
 - 兼容保留的 `reproduce_python_project` 必须固定返回 `repository_execution_disabled` 且 `executed=false`，不得调用宿主 Python 或下载仓库。
 - npm 包必须由 `package.json.files` 只包含 Node 运行时，不得上传 `archive/`、测试、复赛材料或 Python 后端。
 - 冷启动后跑空列表除零、类型错误、5 用例拒绝以及隐藏工具拒绝断言。

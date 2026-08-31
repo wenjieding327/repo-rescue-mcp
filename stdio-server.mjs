@@ -7,6 +7,7 @@ import { dirname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { gunzipSync } from "node:zlib";
+import { runSequentialSnippetPair } from "./snippet-pair.mjs";
 
 // MCP stdio reserves stdout exclusively for JSON-RPC. Keep every incidental
 // message off that channel and write protocol messages explicitly below.
@@ -427,12 +428,16 @@ async function rescuePythonSnippet(args) {
     const cases = Array.isArray(args.test_cases) && args.test_cases.length
       ? args.test_cases
       : [{ name: "default", stdin: "" }];
-    // Original and candidate never share an interpreter. The parent process
-    // owns every comparison and verdict, and each worker has a hard timeout.
-    const [beforeBatch, afterBatch] = await Promise.all([
-      runSnippetWorker(args.original_code, cases),
-      runSnippetWorker(args.candidate_code, cases),
-    ]);
+    // Original and candidate never share an interpreter. Run their two fresh
+    // Pyodide child processes sequentially so low-memory hosts never keep both
+    // runtimes resident at once. Each child retains its own heap, protocol,
+    // output, and wall-clock limits; the parent owns the trusted verdict.
+    const { beforeBatch, afterBatch } = await runSequentialSnippetPair(
+      runSnippetWorker,
+      args.original_code,
+      args.candidate_code,
+      cases,
+    );
     const results = [];
     for (let index = 0; index < cases.length; index += 1) {
       const test = cases[index] || {};
@@ -470,6 +475,7 @@ async function rescuePythonSnippet(args) {
       mode: "single_snippet_rescue",
       verification_level: "L1_SNIPPET_EXECUTION",
       execution_backend: "pyodide_disposable_child_process",
+      worker_execution_strategy: "sequential_fresh_children",
       worker_timeout_ms: SNIPPET_WORKER_TIMEOUT_MS,
       status: fixVerified ? "fix_verified" : candidatePassed ? "candidate_runs" : "candidate_failed",
       fix_verified: fixVerified,

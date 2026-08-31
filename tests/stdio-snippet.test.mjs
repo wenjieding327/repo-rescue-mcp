@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
+import { runSequentialSnippetPair } from "../snippet-pair.mjs";
 
 function runServer(messages, environment = {}) {
   return new Promise((resolve, reject) => {
@@ -29,6 +30,41 @@ function runServer(messages, environment = {}) {
     child.stdin.end(messages.map((message) => JSON.stringify(message)).join("\n") + "\n");
   });
 }
+
+test("runs original and candidate in sequential fresh-worker invocations", async () => {
+  let activeWorkers = 0;
+  let maximumActiveWorkers = 0;
+  const events = [];
+  const invocations = [];
+  const cases = [{ name: "isolation" }];
+  const fakeRunWorker = async (code, receivedCases) => {
+    const invocation = { code, receivedCases, identity: Symbol(code) };
+    invocations.push(invocation);
+    activeWorkers += 1;
+    maximumActiveWorkers = Math.max(maximumActiveWorkers, activeWorkers);
+    events.push(`start:${code}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    events.push(`finish:${code}`);
+    activeWorkers -= 1;
+    return { ok: true, identity: invocation.identity };
+  };
+
+  const result = await runSequentialSnippetPair(fakeRunWorker, "original", "candidate", cases);
+
+  assert.equal(maximumActiveWorkers, 1);
+  assert.deepEqual(events, [
+    "start:original",
+    "finish:original",
+    "start:candidate",
+    "finish:candidate",
+  ]);
+  assert.equal(invocations.length, 2);
+  assert.notEqual(invocations[0].identity, invocations[1].identity);
+  assert.equal(invocations[0].receivedCases, cases);
+  assert.equal(invocations[1].receivedCases, cases);
+  assert.equal(result.beforeBatch.identity, invocations[0].identity);
+  assert.equal(result.afterBatch.identity, invocations[1].identity);
+});
 
 test("lists and executes verified snippet rescue", async () => {
   const responses = await runServer([
@@ -68,8 +104,31 @@ test("lists and executes verified snippet rescue", async () => {
   const payload = JSON.parse(responses.find((response) => response.id === 3).result.content[0].text);
   assert.equal(payload.status, "fix_verified");
   assert.equal(payload.fix_verified, true);
+  assert.equal(payload.worker_execution_strategy, "sequential_fresh_children");
   assert.equal(payload.test_results[0].before.error_type, "IndexError");
   assert.equal(payload.test_results[0].after.stdout, "3\n");
+});
+
+test("original module mutation cannot leak into the candidate worker", async () => {
+  const responses = await runServer([{
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "rescue_python_snippet",
+      arguments: {
+        original_code: "import math\nmath.sqrt = lambda value: 42\nprint(math.sqrt(9))",
+        candidate_code: "import math\nprint(math.sqrt(9))",
+        test_cases: [{ name: "clean-module-state", expected_stdout: "3.0" }],
+      },
+    },
+  }]);
+
+  const payload = JSON.parse(responses[0].result.content[0].text);
+  assert.equal(payload.status, "fix_verified");
+  assert.equal(payload.test_results[0].before.stdout, "42\n");
+  assert.equal(payload.test_results[0].after.stdout, "3.0\n");
+  assert.equal(payload.worker_execution_strategy, "sequential_fresh_children");
 });
 
 test("snippet toolset exposes only snippet rescue and rejects direct hidden calls", async () => {
@@ -457,6 +516,7 @@ test("npm dry-run package contains only the hosted Node runtime", () => {
   assert.deepEqual(paths, [
     "README.md",
     "package.json",
+    "snippet-pair.mjs",
     "snippet-worker.mjs",
     "stdio-server.mjs",
   ]);

@@ -9,6 +9,7 @@
   },
   "files": [
     "stdio-server.mjs",
+    "snippet-pair.mjs",
     "snippet-worker.mjs"
   ],
   "scripts": {

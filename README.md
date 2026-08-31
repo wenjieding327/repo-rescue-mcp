@@ -66,7 +66,7 @@ This deterministic demo is intentionally limited to the bundled trusted project,
 
 ## Quick start: hosted Node MCP
 
-The hosted launcher uses a fresh child-process CPython WebAssembly worker for bounded snippet execution. Node-side repository execution is deliberately disabled; all repository reproduction and repair routes go through the Python backend and its Docker/managed isolation policy.
+The hosted launcher uses a fresh child-process CPython WebAssembly worker for bounded snippet execution. It runs the original and candidate in two separate workers **sequentially**, so a 256 MB hosted instance does not keep two Pyodide runtimes resident at once. The revisions still share no interpreter state, and each worker retains the same hard wall-clock, V8 heap, protocol, and output limits. Because the wall-clock limit applies independently to both workers, the MCP client timeout must allow two worker budgets plus cold-start overhead (about 12 seconds plus overhead with the 6000 ms default). Node-side repository execution is deliberately disabled; all repository reproduction and repair routes go through the Python backend and its Docker/managed isolation policy.
 
 ```powershell
 npm install
