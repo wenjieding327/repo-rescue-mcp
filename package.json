@@ -9,11 +9,13 @@
   },
   "files": [
     "stdio-server.mjs",
+    "actions-bridge.mjs",
     "snippet-pair.mjs",
+    "snippet-worker-env.mjs",
     "snippet-worker.mjs"
   ],
   "scripts": {
-    "test": "node --test tests/stdio-snippet.test.mjs",
+    "test": "node --test tests/stdio-snippet.test.mjs tests/actions-bridge.test.mjs",
     "benchmark": "node scripts/snippet-benchmark.mjs"
   },
   "dependencies": {

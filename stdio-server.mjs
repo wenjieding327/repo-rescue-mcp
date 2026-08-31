@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { gunzipSync } from "node:zlib";
 import { runSequentialSnippetPair } from "./snippet-pair.mjs";
+import { createSnippetWorkerEnvironment } from "./snippet-worker-env.mjs";
+import { ActionsBridgeError, GitHubActionsBridge } from "./actions-bridge.mjs";
 
 // MCP stdio reserves stdout exclusively for JSON-RPC. Keep every incidental
 // message off that channel and write protocol messages explicitly below.
@@ -34,7 +36,11 @@ const configuredNodeToolset = String(
 // A typo in a hosted deployment must not accidentally expose the broader
 // compatibility tool surface. Unset keeps the backwards-compatible full set;
 // every unrecognised explicit value fails closed to the snippet-only set.
-const NODE_TOOLSET = configuredNodeToolset === "full" ? "full" : "snippet";
+const NODE_TOOLSET = configuredNodeToolset === "full"
+  ? "full"
+  : configuredNodeToolset === "platform"
+    ? "platform"
+    : "snippet";
 
 const MAX_SNIPPET_CHARS = 12_000;
 const MAX_SNIPPET_CASES = 4;
@@ -45,6 +51,8 @@ const MAX_CASE_NAME_CHARS = 200;
 const MAX_CASE_STDIN_CHARS = 12_000;
 const MAX_CASE_EXPECTED_STDOUT_CHARS = 12_000;
 const MAX_REPO_URL_CHARS = 500;
+const MAX_PLATFORM_CHANGES = 3;
+const MAX_PLATFORM_REPLACEMENT_CHARS = 12_000;
 const MAX_WORKER_PROTOCOL_BYTES = 1024 * 1024;
 const MAX_WORKER_STDERR_BYTES = 32 * 1024;
 const SNIPPET_WORKER_PATH = fileURLToPath(new URL("./snippet-worker.mjs", import.meta.url));
@@ -127,10 +135,79 @@ const tools = [
     description: "Return a non-mutating PowerShell probe the user can run locally; never claims automatic computer access.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+  {
+    name: "start_prepare_github_repair",
+    description: "Dispatch one allow-listed public GitHub repository to the pinned RepoRescue GitHub Actions workflow for isolated failure reproduction. Returns an unguessable job ID immediately; preparation is not a verified repair.",
+    inputSchema: {
+      type: "object",
+      properties: { repo_url: { type: "string", minLength: 19, maxLength: MAX_REPO_URL_CHARS } },
+      required: ["repo_url"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_repair_job",
+    description: "Poll one GitHub Actions repair job without restarting it. A terminal preparation is in job.result.preparation; a terminal verification is in job.result.repair.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: { type: "string", minLength: 43, maxLength: 43, pattern: "^[A-Za-z0-9_-]{43}$" },
+        wait_seconds: { type: "number", minimum: 0, maximum: 20, default: 0 },
+      },
+      required: ["job_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "start_verify_github_patch",
+    description: "Dispatch bounded complete-file replacements to the same isolated verifier. A repair claim is valid only when the terminal job result contains repair.verified_repair=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo_url: { type: "string", minLength: 19, maxLength: MAX_REPO_URL_CHARS },
+        preparation_job_id: { type: "string", minLength: 43, maxLength: 43, pattern: "^[A-Za-z0-9_-]{43}$" },
+        expected_commit: { type: "string", minLength: 40, maxLength: 40, pattern: "^[0-9a-fA-F]{40}$" },
+        expected_baseline_sha256: { type: "string", minLength: 64, maxLength: 64, pattern: "^[0-9a-fA-F]{64}$" },
+        analysis: { type: "string", maxLength: 4_000, default: "" },
+        issue: { type: "string", maxLength: 8_000, default: "" },
+        changes: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_PLATFORM_CHANGES,
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", minLength: 1, maxLength: 500 },
+              content: { type: "string", maxLength: MAX_PLATFORM_REPLACEMENT_CHARS },
+            },
+            required: ["path", "content"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["repo_url", "preparation_job_id", "expected_commit", "expected_baseline_sha256", "changes"],
+      additionalProperties: false,
+    },
+  },
 ];
-const exposedTools = NODE_TOOLSET === "snippet"
-  ? tools.filter((tool) => tool.name === "rescue_python_snippet")
-  : tools;
+const fullToolNames = new Set([
+  "rescue_python_snippet",
+  "inspect_github_project",
+  "reproduce_python_project",
+  "windows_environment_probe",
+]);
+const platformToolNames = new Set([
+  "rescue_python_snippet",
+  "start_prepare_github_repair",
+  "get_repair_job",
+  "start_verify_github_patch",
+]);
+const selectedToolNames = NODE_TOOLSET === "full"
+  ? fullToolNames
+  : NODE_TOOLSET === "platform"
+    ? platformToolNames
+    : new Set(["rescue_python_snippet"]);
+const exposedTools = tools.filter((tool) => selectedToolNames.has(tool.name));
 const exposedToolNames = new Set(exposedTools.map((tool) => tool.name));
 const knownToolNames = new Set(tools.map((tool) => tool.name));
 
@@ -330,7 +407,11 @@ function runSnippetWorker(code, cases) {
     const child = spawn(
       process.execPath,
       ["--max-old-space-size=192", SNIPPET_WORKER_PATH],
-      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        env: createSnippetWorkerEnvironment(process.env),
+      },
     );
     const stdoutChunks = [];
     const stderrChunks = [];
@@ -536,6 +617,120 @@ function windowsProbe() {
   };
 }
 
+let platformActionsBridge = null;
+
+function platformError(error) {
+  if (error instanceof ActionsBridgeError) {
+    return {
+      ok: false,
+      status: error.code,
+      error_type: error.name,
+      message: String(error.message || "The platform repair request was rejected.").slice(0, 1_000),
+    };
+  }
+  return {
+    ok: false,
+    status: "invalid_request",
+    error_type: "ValidationError",
+    message: String(error?.message || "The platform repair request was rejected.").slice(0, 1_000),
+  };
+}
+
+function getPlatformActionsBridge() {
+  if (!String(process.env.REPO_RESCUE_ALLOWED_REPOS || "").trim()) {
+    throw new ActionsBridgeError(
+      "configuration_required",
+      "REPO_RESCUE_ALLOWED_REPOS must match the reviewed workflow allow-list for platform tools.",
+    );
+  }
+  if (platformActionsBridge === null) platformActionsBridge = GitHubActionsBridge.fromEnvironment(process.env);
+  return platformActionsBridge;
+}
+
+function canonicalPlatformRepo(repoUrl) {
+  if (typeof repoUrl !== "string" || repoUrl.length > MAX_REPO_URL_CHARS) {
+    throw new Error("repo_url must be a canonical GitHub URL no longer than 500 characters.");
+  }
+  const repo = parseRepo(repoUrl);
+  return `https://github.com/${repo.slug}`;
+}
+
+function platformVerifyArguments(args) {
+  const allowed = new Set(["repo_url", "preparation_job_id", "expected_commit", "expected_baseline_sha256", "analysis", "issue", "changes"]);
+  if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some((key) => !allowed.has(key))) {
+    throw new Error("Patch verification arguments do not match the public contract.");
+  }
+  const repoUrl = canonicalPlatformRepo(args.repo_url);
+  if (typeof args.preparation_job_id !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(args.preparation_job_id)) {
+    throw new Error("preparation_job_id must be the capability returned by the matching preparation job.");
+  }
+  if (typeof args.expected_commit !== "string" || !/^[0-9a-fA-F]{40}$/.test(args.expected_commit)) {
+    throw new Error("expected_commit must be the 40-character SHA returned by preparation.");
+  }
+  if (typeof args.expected_baseline_sha256 !== "string" || !/^[0-9a-fA-F]{64}$/.test(args.expected_baseline_sha256)) {
+    throw new Error("expected_baseline_sha256 must be the 64-character hash returned by preparation.");
+  }
+  const analysis = args.analysis ?? "";
+  const issue = args.issue ?? "";
+  if (typeof analysis !== "string" || analysis.length > 4_000) throw new Error("analysis must be no longer than 4000 characters.");
+  if (typeof issue !== "string" || issue.length > 8_000) throw new Error("issue must be no longer than 8000 characters.");
+  if (!Array.isArray(args.changes) || args.changes.length < 1 || args.changes.length > MAX_PLATFORM_CHANGES) {
+    throw new Error(`changes must contain between 1 and ${MAX_PLATFORM_CHANGES} replacements.`);
+  }
+  const changes = args.changes.map((change) => {
+    if (
+      !change
+      || typeof change !== "object"
+      || Array.isArray(change)
+      || Object.keys(change).some((key) => !new Set(["path", "content"]).has(key))
+      || typeof change.path !== "string"
+      || change.path.length < 1
+      || change.path.length > 500
+      || typeof change.content !== "string"
+      || change.content.length > MAX_PLATFORM_REPLACEMENT_CHARS
+    ) {
+      throw new Error("Every change must contain only a bounded string path and complete replacement content.");
+    }
+    return { path: change.path, content: change.content };
+  });
+  return {
+    preparation_job_id: args.preparation_job_id,
+    repo_url: repoUrl,
+    expected_commit: args.expected_commit,
+    expected_baseline_sha256: args.expected_baseline_sha256,
+    analysis,
+    issue,
+    changes,
+  };
+}
+
+async function callPlatformTool(name, args) {
+  try {
+    const bridge = getPlatformActionsBridge();
+    if (name === "start_prepare_github_repair") {
+      if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some((key) => key !== "repo_url")) {
+        throw new Error("Preparation accepts only repo_url.");
+      }
+      return bridge.start("prepare", { repo_url: canonicalPlatformRepo(args.repo_url) });
+    }
+    if (name === "start_verify_github_patch") {
+      const verifiedArgs = platformVerifyArguments(args);
+      const preparationJobId = verifiedArgs.preparation_job_id;
+      delete verifiedArgs.preparation_job_id;
+      return bridge.startVerify(preparationJobId, verifiedArgs);
+    }
+    if (name === "get_repair_job") {
+      if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some((key) => !new Set(["job_id", "wait_seconds"]).has(key))) {
+        throw new Error("Job polling accepts only job_id and wait_seconds.");
+      }
+      return bridge.get(args.job_id, args.wait_seconds ?? 0);
+    }
+    throw new Error(`Unknown platform tool: ${name}`);
+  } catch (error) {
+    return platformError(error);
+  }
+}
+
 async function callTool(name, args) {
   if (!exposedToolNames.has(name)) {
     if (knownToolNames.has(name)) {
@@ -551,6 +746,7 @@ async function callTool(name, args) {
   if (name === "inspect_github_project") return inspectProject(args.repo_url);
   if (name === "reproduce_python_project") return reproduceProject(args.repo_url);
   if (name === "windows_environment_probe") return windowsProbe();
+  if (platformToolNames.has(name)) return callPlatformTool(name, args);
   throw new Error(`Unknown tool: ${name}`);
 }
 

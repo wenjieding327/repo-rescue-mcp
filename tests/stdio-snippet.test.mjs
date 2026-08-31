@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import { runSequentialSnippetPair } from "../snippet-pair.mjs";
+import { createSnippetWorkerEnvironment } from "../snippet-worker-env.mjs";
 
 function runServer(messages, environment = {}) {
   return new Promise((resolve, reject) => {
@@ -64,6 +65,24 @@ test("runs original and candidate in sequential fresh-worker invocations", async
   assert.equal(invocations[1].receivedCases, cases);
   assert.equal(result.beforeBatch.identity, invocations[0].identity);
   assert.equal(result.afterBatch.identity, invocations[1].identity);
+});
+
+test("snippet workers receive a minimal environment without hosted credentials", () => {
+  const environment = createSnippetWorkerEnvironment({
+    PATH: "safe-path",
+    SYSTEMROOT: "C:\\Windows",
+    REPO_RESCUE_GITHUB_TOKEN: "github_pat_secret",
+    REPO_RESCUE_ACTIONS_REPOSITORY: "owner/control",
+    GITHUB_TOKEN: "ghp_secret",
+    OPENAI_API_KEY: "sk-secret",
+    NODE_OPTIONS: "--require=malicious.js",
+  });
+  assert.deepEqual(environment, {
+    PATH: "safe-path",
+    SYSTEMROOT: "C:\\Windows",
+    NODE_NO_WARNINGS: "1",
+  });
+  assert.equal(JSON.stringify(environment).includes("secret"), false);
 });
 
 test("lists and executes verified snippet rescue", async () => {
@@ -183,6 +202,76 @@ test("an explicitly empty Node toolset also fails closed to snippet-only", async
     responses[0].result.tools.map((tool) => tool.name),
     ["rescue_python_snippet"],
   );
+});
+
+test("platform toolset exposes exactly the hosted repair bridge and fails closed without credentials", async () => {
+  const responses = await runServer(
+    [
+      { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "start_prepare_github_repair",
+          arguments: { repo_url: "https://github.com/wenjieding327/repo-rescue-canary" },
+        },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "inspect_github_project", arguments: { repo_url: "https://github.com/pallets/click" } },
+      },
+    ],
+    {
+      REPO_RESCUE_NODE_TOOLSET: "platform",
+      REPO_RESCUE_GITHUB_TOKEN: "",
+      REPO_RESCUE_ACTIONS_REF: "main",
+      REPO_RESCUE_ALLOWED_REPOS: "wenjieding327/repo-rescue-canary",
+    },
+  );
+
+  assert.deepEqual(
+    responses.find((response) => response.id === 1).result.tools.map((tool) => tool.name),
+    [
+      "rescue_python_snippet",
+      "start_prepare_github_repair",
+      "get_repair_job",
+      "start_verify_github_patch",
+    ],
+  );
+  const configuration = JSON.parse(responses.find((response) => response.id === 2).result.content[0].text);
+  assert.equal(configuration.ok, false);
+  assert.equal(configuration.status, "configuration_required");
+  assert.equal(JSON.stringify(configuration).includes("token="), false);
+  const hidden = responses.find((response) => response.id === 3).result;
+  assert.equal(hidden.isError, true);
+  assert.equal(JSON.parse(hidden.content[0].text).status, "tool_unavailable");
+});
+
+test("platform repository start fails closed when the Node allow-list is missing", async () => {
+  const responses = await runServer(
+    [{
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "start_prepare_github_repair",
+        arguments: { repo_url: "https://github.com/wenjieding327/repo-rescue-canary" },
+      },
+    }],
+    {
+      REPO_RESCUE_NODE_TOOLSET: "platform",
+      REPO_RESCUE_GITHUB_TOKEN: "not-a-real-token",
+      REPO_RESCUE_ACTIONS_REF: "main",
+      REPO_RESCUE_ALLOWED_REPOS: "",
+    },
+  );
+  const payload = JSON.parse(responses[0].result.content[0].text);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.status, "configuration_required");
+  assert.match(payload.message, /REPO_RESCUE_ALLOWED_REPOS/);
 });
 
 test("rejects oversized snippet case metadata before starting a worker", async () => {
@@ -515,8 +604,10 @@ test("npm dry-run package contains only the hosted Node runtime", () => {
   const paths = manifest.files.map((file) => file.path).sort();
   assert.deepEqual(paths, [
     "README.md",
+    "actions-bridge.mjs",
     "package.json",
     "snippet-pair.mjs",
+    "snippet-worker-env.mjs",
     "snippet-worker.mjs",
     "stdio-server.mjs",
   ]);

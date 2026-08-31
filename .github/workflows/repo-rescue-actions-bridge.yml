@@ -1,0 +1,76 @@
+name: RepoRescue isolated repair bridge
+run-name: RepoRescue ${{ inputs.request_id }} ${{ inputs.mode }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: Strict gzip+base64 RepoRescue JSON payload
+        required: true
+        type: string
+      request_id:
+        description: Public workflow correlation nonce (not an authorization capability)
+        required: true
+        type: string
+      mode:
+        description: Bridge operation
+        required: true
+        type: choice
+        options:
+          - prepare
+          - verify
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-rescue-isolated-repair-bridge
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # v4, pinned so a mutable action tag cannot alter this trust boundary.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      # v5, pinned.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Build the fixed verifier image
+        run: docker build -t repo-rescue-python:3.11 -f sandbox/Dockerfile.python311 .
+
+      - name: Install the trusted RepoRescue controller
+        run: python -m pip install .
+
+      - name: Execute one allow-listed repair operation
+        id: bridge
+        env:
+          REPO_RESCUE_BRIDGE_PAYLOAD: ${{ inputs.payload }}
+          REPO_RESCUE_BRIDGE_REQUEST_ID: ${{ inputs.request_id }}
+          REPO_RESCUE_BRIDGE_MODE: ${{ inputs.mode }}
+          REPO_RESCUE_BRIDGE_OUTPUT: ${{ runner.temp }}/repo-rescue-bridge-output
+          # Competition allow-list. Add a repository only by reviewing and
+          # changing this trusted workflow on the protected bridge branch.
+          REPO_RESCUE_BRIDGE_ALLOWED_REPOS: wenjieding327/repo-rescue-canary,wenjieding327/repo-rescue-mcp
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+        run: python scripts/actions_bridge_runner.py
+
+      # v4, pinned. This step runs after controlled failures too, so the MCP
+      # receives result.json rather than inventing an explanation.
+      - name: Upload bound result and evidence
+        if: always() && steps.bridge.outputs.artifact_name != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.bridge.outputs.artifact_name }}
+          path: ${{ runner.temp }}/repo-rescue-bridge-output
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6

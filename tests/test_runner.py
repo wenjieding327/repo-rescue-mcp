@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,8 +6,18 @@ import pytest
 
 from repo_rescue.bridge import baseline_sha256
 from repo_rescue.repository import RepositorySnapshot, inventory
-from repo_rescue.runner import _container_base, _copy_repository_tree, _reproduce_direct, _safe_dependencies
+from repo_rescue.runner import _container_base, _copy_repository_tree, _docker_available, _reproduce_direct, _safe_dependencies
 from repo_rescue.security import SecurityError, require_execution_allowed
+
+
+def test_docker_availability_treats_timeout_as_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("repo_rescue.runner.shutil.which", lambda _name: "docker")
+
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd=["docker", "info"], timeout=15)
+
+    monkeypatch.setattr("repo_rescue.runner.subprocess.run", timeout)
+    assert _docker_available() is False
 
 
 def test_safe_dependencies_accepts_pep508() -> None:

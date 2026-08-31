@@ -42,15 +42,18 @@ def _sanitize_record_paths(record: dict[str, Any], staging_root: Path) -> None:
 def _docker_available() -> bool:
     if shutil.which("docker") is None:
         return False
-    result = subprocess.run(
-        ["docker", "info"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=15,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return result.returncode == 0
 
 

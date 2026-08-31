@@ -66,7 +66,7 @@ This deterministic demo is intentionally limited to the bundled trusted project,
 
 ## Quick start: hosted Node MCP
 
-The hosted launcher uses a fresh child-process CPython WebAssembly worker for bounded snippet execution. It runs the original and candidate in two separate workers **sequentially**, so a 256 MB hosted instance does not keep two Pyodide runtimes resident at once. The revisions still share no interpreter state, and each worker retains the same hard wall-clock, V8 heap, protocol, and output limits. Because the wall-clock limit applies independently to both workers, the MCP client timeout must allow two worker budgets plus cold-start overhead (about 12 seconds plus overhead with the 6000 ms default). Node-side repository execution is deliberately disabled; all repository reproduction and repair routes go through the Python backend and its Docker/managed isolation policy.
+The hosted launcher uses a fresh child-process CPython WebAssembly worker for bounded snippet execution. It runs the original and candidate in two separate workers **sequentially**, so a 256 MB hosted instance does not keep two Pyodide runtimes resident at once. The revisions still share no interpreter state, and each worker retains the same hard wall-clock, V8 heap, protocol, and output limits. Because the wall-clock limit applies independently to both workers, the MCP client timeout must allow two worker budgets plus cold-start overhead (about 12 seconds plus overhead with the 6000 ms default). Node never executes repository code in its own hosted container. The `platform` toolset can instead dispatch a bound request to this repository's trusted GitHub Actions workflow, where the Python v0.4 backend uses Docker isolation.
 
 ```powershell
 npm install
@@ -75,7 +75,35 @@ npm run benchmark
 node .\stdio-server.mjs
 ```
 
-For compatibility the Node launcher defaults to the four-tool surface, but `reproduce_python_project` never clones or executes repository code there. Set `REPO_RESCUE_NODE_TOOLSET=snippet` on a public hosted instance; both discovery and direct calls then expose only `rescue_python_snippet`. Use the Python MCP for every repository tool.
+For compatibility the Node launcher defaults to the legacy four-tool surface, but `reproduce_python_project` never clones or executes repository code there. Set `REPO_RESCUE_NODE_TOOLSET=snippet` for snippet-only hosting. Set it to `platform` for the competition deployment; discovery then contains exactly `rescue_python_snippet`, `start_prepare_github_repair`, `get_repair_job`, and `start_verify_github_patch`, while direct calls to hidden legacy tools fail closed.
+
+### XFYun-hosted full repair through GitHub Actions
+
+The `platform` toolset keeps the lightweight stdio MCP on XFYun and moves only the long, untrusted repository run to an Ubuntu GitHub runner:
+
+```text
+XFYun model → Node stdio start tool → GitHub workflow_dispatch
+             → pinned workflow checkout → fixed verifier Docker image
+             → Python v0.4 prepare/verify → bound artifact ZIP
+XFYun model ← Node poll tool ← result.json + repair.patch + evidence.json + report.md
+```
+
+Configure the hosted MCP process with administrator-owned values; none of them is accepted as a tool argument:
+
+```text
+REPO_RESCUE_NODE_TOOLSET=platform
+REPO_RESCUE_GITHUB_TOKEN=<fine-grained token>
+REPO_RESCUE_ACTIONS_REPOSITORY=wenjieding327/repo-rescue-mcp
+REPO_RESCUE_ACTIONS_WORKFLOW=repo-rescue-actions-bridge.yml
+REPO_RESCUE_ACTIONS_REF=<protected branch containing the reviewed workflow>
+REPO_RESCUE_ALLOWED_REPOS=wenjieding327/repo-rescue-canary,wenjieding327/repo-rescue-mcp
+```
+
+The fine-grained token is restricted to the one bridge repository with **Actions read/write**; RepoRescue does not need Contents, Workflows, Administration, or a model API key on that token. The Node and workflow allow-lists must be identical. The trusted workflow has its own fixed allow-list, builds `repo-rescue-python:3.11`, clears `GITHUB_TOKEN`/`GH_TOKEN` for the controller step, and never adds a credential to the untrusted Docker container.
+
+Dispatch payloads are gzip+base64 but are not trusted: both sides enforce 55,000 encoded and expanded bytes, at most three replacements, and 12,000 characters per replacement. Active work defaults to one job (matching the workflow's global single concurrency), three starts per minute, and twelve starts per hour. Every start receives a private in-process `job_id`; the separate 256-bit `request_id` appears in the public Actions run/artifact only as a correlation nonce and is never accepted as authorization. A timed-out dispatch POST is discovered by that exact nonce and is never implicitly re-dispatched. Verification additionally requires the still-live private `preparation_job_id`, an exact repository/commit/baseline match, and one-time consumption of that preparation capability; an idempotent retry of the same verify call returns its already-started verify job. Polling checks workflow/run/ref/head SHA, request ID, payload SHA, artifact ID/digest, ZIP layout, patch SHA, and evidence fields. A successful verify returns the real bounded patch, evidence JSON, and report text under `job.result.github_actions.artifact_contents`.
+
+This competition bridge remains intentionally limited to reviewed **public Python repositories**. Do not put credentials, private source, personal data, or secrets in the issue text or proposed patch: workflow inputs and one-day artifacts live in the team's GitHub Actions control repository. The hosted process keeps job capabilities in memory; if that process restarts, an already-running GitHub job may finish but the old `job_id` is no longer pollable. The Agent must start a fresh prepare chain rather than reuse an orphaned commit/baseline. A commercial service should persist job mappings in a database and use a GitHub App installation token.
 
 ### `rescue_python_snippet`
 
@@ -141,7 +169,7 @@ start_verify_github_patch(...) → job_id
 get_repair_job(job_id, wait_seconds<=20) → verified result
 ```
 
-The actual wire shape is `start.job.job_id`, followed by `poll.job.terminal/status/result`; preparation lives at `job.result.preparation` and the final verdict at `job.result.repair.verified_repair`. A job status of `succeeded` means only that the backend operation returned—not that a repair was verified. Jobs run with single-worker concurrency, unguessable IDs, a bounded active-job queue, a separately bounded completed-result cache, and a finite in-memory TTL. Long polls run off the ASGI event loop under their own concurrency limiter.
+The actual wire shape is `start.job.job_id`, followed by `poll.job.terminal/status/result`; preparation lives at `job.result.preparation` and the final verdict at `job.result.repair.verified_repair`. The hosted Node `platform` variant adds a required `preparation_job_id` to its verify tool and consumes that capability once; the direct Python MCP signature remains unchanged. A job status of `succeeded` means only that the backend operation returned—not that a repair was verified. Jobs use unguessable lookup IDs, bounded queues/rates, and finite in-memory TTLs.
 
 The in-memory job store is deliberately a single-instance competition/demo design: run exactly one application process and one replica so a start and its polls reach the same store. Jobs do not survive restart or rolling deployment. A commercial multi-worker or multi-replica service must move the queue and results to Redis or a database, authenticate callers, enforce per-tenant rate limits, and terminate TLS at a gateway.
 
