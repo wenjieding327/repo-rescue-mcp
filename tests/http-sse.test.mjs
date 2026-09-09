@@ -5,6 +5,22 @@ import { createLegacySseServer } from "../http-sse-server.mjs";
 
 const ACCESS_TOKEN = "test-only-access-token-with-at-least-32-bytes";
 
+async function postTool(baseUrl, name, args, headers = {}) {
+  return fetch(`${baseUrl}/api/tools/${name}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(args),
+  });
+}
+
+async function httpToolPayload(response) {
+  assert.equal(response.status, 200);
+  const envelope = await response.json();
+  assert.equal(envelope.is_error, false);
+  const mcpResult = JSON.parse(envelope.result_json);
+  return JSON.parse(mcpResult.content[0].text);
+}
+
 async function startServer(t, environment = {}) {
   const service = createLegacySseServer({
     environment: {
@@ -203,4 +219,62 @@ test("invalid JSON-RPC and direct hidden tools cannot bypass the gateway", { tim
   const reply = (await session.nextEvent()).data;
   assert.equal(reply.result.isError, true);
   assert.equal(JSON.parse(reply.result.content[0].text).status, "tool_unavailable");
+});
+
+test("HTTP plugin endpoints require header authentication and reject hidden tools", async (t) => {
+  const { baseUrl } = await startServer(t);
+  for (const name of ["rescue_python_snippet", "start_prepare_github_repair", "get_repair_job", "start_verify_github_patch"]) {
+    assert.equal((await postTool(baseUrl, name, {}, { Authorization: "" })).status, 401);
+    assert.equal((await postTool(baseUrl, name, {}, { Origin: "https://example.com" })).status, 403);
+  }
+  assert.equal((await postTool(baseUrl, "windows_environment_probe", {})).status, 404);
+  assert.equal((await postTool(baseUrl, "rescue_python_snippet?token=" + ACCESS_TOKEN, {}, { Authorization: "" })).status, 401);
+  assert.equal((await fetch(`${baseUrl}/api/tools/rescue_python_snippet`)).status, 404);
+});
+
+test("HTTP plugins preserve real snippet repair and unsafe import evidence", { timeout: 60000 }, async (t) => {
+  const { baseUrl } = await startServer(t);
+  const fixed = await httpToolPayload(await postTool(baseUrl, "rescue_python_snippet", {
+    original_code: "print(1 / 0)", candidate_code: "print(0)",
+    test_cases: [{ name: "output", expected_stdout: "0" }],
+  }));
+  assert.equal(fixed.fix_verified, true);
+  const rejected = await httpToolPayload(await postTool(baseUrl, "rescue_python_snippet", {
+    original_code: "import os\nprint(os.getcwd())", candidate_code: "import os\nprint(os.getcwd())",
+    test_cases: [{ name: "output", expected_stdout: "0" }],
+  }));
+  assert.equal(rejected.fix_verified, false);
+  assert.match(JSON.stringify(rejected), /PermissionError/);
+});
+
+test("HTTP plugin repo tools fail closed and never interpret HTTP 200 as repair success", async (t) => {
+  const { baseUrl } = await startServer(t);
+  const payload = await httpToolPayload(await postTool(baseUrl, "start_prepare_github_repair", {
+    repo_url: "https://github.com/wenjieding327/repo-rescue-canary",
+  }));
+  assert.equal(payload.ok, false);
+  assert.equal(payload.status, "configuration_required");
+});
+
+test("HTTP plugin arguments cannot select a different tool or protocol method", async (t) => {
+  const { baseUrl } = await startServer(t);
+  const response = await postTool(baseUrl, "get_repair_job", {
+    jsonrpc: "2.0", method: "tools/list", params: { name: "windows_environment_probe" },
+    job_id: "nonexistent-job",
+  });
+  assert.equal(response.status, 200);
+  const envelope = await response.json();
+  // The configured route runs the repository preflight, not injected tools/list.
+  assert.equal(JSON.parse(JSON.parse(envelope.result_json).content[0].text).status, "configuration_required");
+  assert.doesNotMatch(envelope.result_json, /inputSchema/);
+});
+
+test("HTTP plugin parsing rejects malformed, oversized and non-object bodies", async (t) => {
+  const { baseUrl } = await startServer(t);
+  for (const body of [null, [], "text"]) {
+    assert.equal((await postTool(baseUrl, "get_repair_job", body)).status, 400);
+  }
+  assert.equal((await postTool(baseUrl, "get_repair_job", {}, { "Content-Type": "text/plain" })).status, 415);
+  assert.equal((await postTool(baseUrl, "get_repair_job", { value: "x".repeat(2 * 1024 * 1024) })).status, 413);
+  assert.equal((await fetch(`${baseUrl}/healthz`)).status, 200);
 });

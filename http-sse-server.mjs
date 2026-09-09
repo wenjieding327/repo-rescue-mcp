@@ -186,6 +186,22 @@ export function createLegacySseServer({
     initialReadyReject = reject;
   });
 
+  function deliver(item, message, httpStatus = 200) {
+    if (item.httpResponse) {
+      if (!item.httpResponse.destroyed && !item.httpResponse.writableEnded) {
+        // Keep the entire original MCP result as evidence. Do not reinterpret
+        // HTTP success as a verified repair or manufacture tool status fields.
+        sendJson(item.httpResponse, httpStatus, {
+          is_error: Boolean(message.error || message.result?.isError),
+          result_json: JSON.stringify(message.error ? { error: message.error } : message.result),
+        });
+      }
+      return;
+    }
+    const session = sessions.get(item.sessionId);
+    if (session) sseEvent(session.response, "message", { ...message, id: item.originalId });
+  }
+
   function closeSessions() {
     for (const [sessionId, session] of sessions) {
       session.response.end();
@@ -196,14 +212,11 @@ export function createLegacySseServer({
   function failPending(message) {
     for (const [internalId, item] of pending) {
       clearTimeout(item.timer);
-      const session = sessions.get(item.sessionId);
-      if (session) {
-        sseEvent(session.response, "message", {
+      deliver(item, {
           jsonrpc: "2.0",
           id: item.originalId,
           error: { code: -32603, message },
-        });
-      }
+      }, 503);
       pending.delete(internalId);
     }
   }
@@ -253,9 +266,7 @@ export function createLegacySseServer({
       if (!item) return;
       pending.delete(String(internalId));
       clearTimeout(item.timer);
-      const session = sessions.get(item.sessionId);
-      if (!session) return;
-      sseEvent(session.response, "message", { ...message, id: item.originalId });
+      deliver(item, message);
     },
     onFailure(message) {
       ready = false;
@@ -307,13 +318,13 @@ export function createLegacySseServer({
     sseEvent(response, "endpoint", `/messages/?session_id=${encodeURIComponent(sessionId)}`);
   }
 
-  function receiveMessage(request, response, url) {
+  function receiveMessage(request, response, url, toolName = null) {
     if (!authenticated(request)) {
       sendJson(response, 401, { ok: false, error: "unauthorized" });
       return;
     }
     const sessionId = String(url.searchParams.get("session_id") || "");
-    const session = sessions.get(sessionId);
+    const session = toolName ? { requests: [] } : sessions.get(sessionId);
     if (!session) {
       sendJson(response, 404, { ok: false, error: "unknown_session" });
       return;
@@ -356,6 +367,14 @@ export function createLegacySseServer({
         sendJson(response, 400, { ok: false, error: "invalid_json" });
         return;
       }
+      if (toolName) {
+        if (!message || typeof message !== "object" || Array.isArray(message)) {
+          sendJson(response, 400, { ok: false, error: "arguments_must_be_an_object" });
+          return;
+        }
+        message = { jsonrpc: "2.0", id: "http-tool", method: "tools/call",
+          params: { name: toolName, arguments: message } };
+      }
       if (!message || typeof message !== "object" || Array.isArray(message) || message.jsonrpc !== "2.0"
         || typeof message.method !== "string"
         || (message.id !== undefined && message.id !== null && typeof message.id !== "string" && typeof message.id !== "number")) {
@@ -365,7 +384,7 @@ export function createLegacySseServer({
       const hasId = message.id !== undefined && message.id !== null;
       // Admission must be checked after receiving the body too: concurrent uploads
       // can all pass the initial check before any request has reserved capacity.
-      if (!sessions.has(sessionId) || !ready) {
+      if ((!toolName && !sessions.has(sessionId)) || !ready) {
         sendJson(response, 503, { ok: false, error: "session_or_worker_unavailable" });
         return;
       }
@@ -379,17 +398,17 @@ export function createLegacySseServer({
           const item = pending.get(internalId);
           if (!item) return;
           pending.delete(internalId);
-          const session = sessions.get(item.sessionId);
-          if (session) {
-            sseEvent(session.response, "message", {
+          deliver(item, {
               jsonrpc: "2.0",
               id: item.originalId,
               error: { code: -32603, message: "The MCP worker response timed out." },
-            });
-          }
+          }, 504);
         }, REQUEST_TIMEOUT_MS);
         timer.unref();
-        pending.set(internalId, { sessionId, originalId: message.id, timer });
+        pending.set(internalId, {
+          sessionId, originalId: message.id, timer,
+          httpResponse: toolName ? response : null,
+        });
       }
       try {
         platform.send(hasId ? { ...message, id: internalId } : message);
@@ -402,6 +421,9 @@ export function createLegacySseServer({
         sendJson(response, 503, { ok: false, error: "mcp_worker_unavailable" });
         return;
       }
+      // HTTP plugins receive the tool result directly. SSE clients still get
+      // a 202 acknowledgement and their response over the existing stream.
+      if (toolName) return;
       response.writeHead(202, {
         "Cache-Control": "no-store",
         "Content-Length": "0",
@@ -437,6 +459,17 @@ export function createLegacySseServer({
     }
     if (request.method === "POST" && (url.pathname === "/messages" || url.pathname === "/messages/")) {
       receiveMessage(request, response, url);
+      return;
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/api/tools/")) {
+      const toolName = url.pathname.slice("/api/tools/".length);
+      if (!authenticated(request)) {
+        sendJson(response, 401, { ok: false, error: "unauthorized" });
+      } else if (!REQUIRED_TOOL_NAMES.includes(toolName)) {
+        sendJson(response, 404, { ok: false, error: "tool_unavailable" });
+      } else {
+        receiveMessage(request, response, url, toolName);
+      }
       return;
     }
     sendJson(response, 404, { ok: false, error: "not_found" });
