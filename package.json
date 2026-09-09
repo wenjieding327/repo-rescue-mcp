@@ -17,7 +17,8 @@
     "snippet-worker.mjs"
   ],
   "scripts": {
-    "test": "node --test tests/stdio-snippet.test.mjs tests/actions-bridge.test.mjs",
+    "start": "node http-sse-server.mjs",
+    "test": "node --test tests/stdio-snippet.test.mjs tests/actions-bridge.test.mjs tests/http-sse.test.mjs",
     "benchmark": "node scripts/snippet-benchmark.mjs",
     "pack:xfyun": "node scripts/build-xfyun-package.mjs",
     "verify:xfyun": "node scripts/verify-xfyun-package.mjs"
