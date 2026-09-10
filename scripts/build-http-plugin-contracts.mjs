@@ -52,13 +52,27 @@ try {
   const output = join(root, "dist", "http-plugins");
   mkdirSync(output, { recursive: true });
   tools.forEach((tool, index) => {
+    // HTTP-only compatibility for editors that render nested objects as React
+    // children. The original MCP schema and runtime array validation stay intact.
+    const inputSchema = structuredClone(tool.inputSchema);
+    if (tool.name === "rescue_python_snippet") {
+      inputSchema.properties.test_cases = {
+        type: "string",
+        description: "JSON-encoded array of 1 to 4 objects. Each object must contain name (string) and expected_stdout (string) from the user's requirement or an independent test oracle. Encode newline characters as JSON escapes. Do not invent or default the expected output; no oracle means no verified repair.",
+      };
+    } else if (tool.name === "start_verify_github_patch") {
+      inputSchema.properties.changes = {
+        type: "string",
+        description: "JSON-encoded array of 1 to 3 objects, each with path (existing non-test file path) and content (the complete replacement file, at most 12000 characters). Preserve indentation and encode newlines as JSON escapes. Do not modify tests or include extra fields.",
+      };
+    }
     const contract = {
       openapi: "3.0.3", info: { title: titles[index], version: "0.4.1", description: tool.description },
       servers: [{ url: "https://reporescue-mcp-production.up.railway.app" }],
       paths: { [`/api/tools/${tool.name}`]: { post: {
         operationId: titles[index], summary: tool.description,
         security: [{ bearerAuth: [] }],
-        requestBody: { required: true, content: { "application/json": { schema: tool.inputSchema } } },
+        requestBody: { required: true, content: { "application/json": { schema: inputSchema } } },
         responses: { "200": { description: "Original MCP evidence. HTTP 200 does not imply repair success.", content: {
           "application/json": { schema: { type: "object", required: ["is_error", "result_json"], properties: {
             is_error: { type: "boolean", description: "MCP protocol/tool error indicator, not repair verification status" },

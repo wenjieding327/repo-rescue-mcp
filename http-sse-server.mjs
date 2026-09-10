@@ -372,6 +372,19 @@ export function createLegacySseServer({
           sendJson(response, 400, { ok: false, error: "arguments_must_be_an_object" });
           return;
         }
+        // Some HTTP plugin editors cannot reliably render Array<Object> inputs.
+        // Decode only these two reviewed fields; stdio/SSE keep native arrays.
+        const arrayField = toolName === "rescue_python_snippet" ? "test_cases"
+          : toolName === "start_verify_github_patch" ? "changes" : null;
+        if (arrayField && typeof message[arrayField] === "string") {
+          let decoded;
+          try { decoded = JSON.parse(message[arrayField]); } catch { /* Reject below without echoing input. */ }
+          if (!Array.isArray(decoded)) {
+            sendJson(response, 400, { ok: false, error: "argument_must_be_a_json_array", field: arrayField });
+            return;
+          }
+          message = { ...message, [arrayField]: decoded };
+        }
         message = { jsonrpc: "2.0", id: "http-tool", method: "tools/call",
           params: { name: toolName, arguments: message } };
       }
