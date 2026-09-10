@@ -1,31 +1,42 @@
 #!/usr/bin/env node
 
 import { GitHubActionsBridge } from "../actions-bridge.mjs";
+import { fileURLToPath } from "node:url";
 
 const CANARY_URL = "https://github.com/wenjieding327/repo-rescue-canary";
 const MAX_POLLS_PER_STAGE = 90;
+const MAX_HTTP_RESPONSE_BYTES = 32 * 1024 * 1024;
+const JOB_STATUSES = new Set(["dispatching", "dispatch_unknown", "queued", "running", "collecting_artifact",
+  "poll_deferred", "succeeded", "failed"]);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-async function pollToTerminal(bridge, stage, initial) {
+export async function pollToTerminal(bridge, stage, initial, stderr = process.stderr) {
+  assert(stage === "prepare" || stage === "verify", "Unexpected smoke stage.");
   let snapshot = initial;
   for (let attempt = 1; attempt <= MAX_POLLS_PER_STAGE; attempt += 1) {
     assert(snapshot?.ok === true && snapshot?.job?.job_id, `${stage} did not return a live job capability.`);
+    assert(JOB_STATUSES.has(snapshot.job.status), "The job returned an unknown status.");
     if (snapshot.job.terminal === true) return snapshot;
-    process.stderr.write(`${stage}: ${snapshot.job.status} (poll ${attempt})\n`);
+    stderr.write(`${stage}: ${snapshot.job.status} (poll ${attempt})\n`);
     snapshot = await bridge.get(snapshot.job.job_id, 20);
   }
   throw new Error(`${stage} did not finish within the live smoke polling budget.`);
 }
 
-async function main() {
-  const bridge = GitHubActionsBridge.fromEnvironment(process.env);
+export async function main({ baseUrl = process.argv[2], environment = process.env, fetchImpl = fetch,
+  stdout = process.stdout, stderr = process.stderr } = {}) {
+  // Optional HTTP mode exercises the deployed plugin adapter, not a local bridge.
+  const bridge = baseUrl ? httpBridge(baseUrl, {
+    token: environment.REPO_RESCUE_HTTP_ACCESS_TOKEN, fetchImpl, stderr,
+  }) : GitHubActionsBridge.fromEnvironment(environment);
   const preparation = await pollToTerminal(
     bridge,
     "prepare",
     await bridge.start("prepare", { repo_url: CANARY_URL }),
+    stderr,
   );
   assert(preparation.job.status === "succeeded", "The live preparation job failed.");
   const prepared = preparation.job.result?.preparation;
@@ -66,6 +77,7 @@ async function main() {
         },
       ],
     }),
+    stderr,
   );
   assert(verification.job.status === "succeeded", "The live verification job failed.");
   const result = verification.job.result;
@@ -76,7 +88,7 @@ async function main() {
   assert(repair?.verified_repair === true && repair?.status === "verified_repair", "The canary repair was not verified.");
   assert(repair?.repository?.commit === prepared.repository.commit, "Verification changed the prepared repository commit.");
   assert(repair?.baseline?.preparation_baseline_sha256 === prepared.baseline_sha256, "Verification changed the prepared baseline hash.");
-  assert(repair?.baseline?.execution?.exit_code !== 0, "The original canary did not fail.");
+  assert(repair?.baseline?.execution?.exit_code === 1, "The original canary did not exit with code 1.");
   assert(repair?.final_verification?.execution?.exit_code === 0, "The repaired canary did not pass.");
   assert(
     repair.baseline.command === repair.final_verification.command,
@@ -99,19 +111,24 @@ async function main() {
   assert(result.github_actions?.files?.["repair.patch"]?.sha256 === repair.patch_sha256, "Artifact metadata returned a different patch hash.");
   assert(contents.report.includes(repair.run_id), "The report did not identify the verified repair run.");
   assert(preparationActions?.head_sha === result.github_actions?.head_sha, "Prepare and verify used different bridge commits.");
-  const expectedHead = String(process.env.REPO_RESCUE_ACTIONS_EXPECTED_HEAD_SHA || "").trim().toLowerCase();
+  const expectedHead = String(environment.REPO_RESCUE_ACTIONS_EXPECTED_HEAD_SHA || "").trim().toLowerCase();
   if (expectedHead) {
     assert(/^[0-9a-f]{40}$/.test(expectedHead), "REPO_RESCUE_ACTIONS_EXPECTED_HEAD_SHA is invalid.");
     assert(result.github_actions?.head_sha === expectedHead, "The live workflow did not use the expected bridge commit.");
   }
 
-  process.stdout.write(`${JSON.stringify({
+  // Only emit validated, public evidence identifiers. Job IDs are bearer capabilities.
+  assert(Number.isSafeInteger(preparationActions?.workflow_run_id) && preparationActions.workflow_run_id > 0,
+    "Preparation returned an invalid public run ID.");
+  assert(Number.isSafeInteger(result.github_actions?.workflow_run_id) && result.github_actions.workflow_run_id > 0,
+    "Verification returned an invalid public run ID.");
+  assert(/^[0-9a-f]{40}$/.test(result.github_actions?.head_sha), "Verification returned an invalid bridge commit.");
+  assert(/^[0-9a-f]{64}$/.test(repair.patch_sha256), "Verification returned an invalid patch hash.");
+  stdout.write(`${JSON.stringify({
     ok: true,
     source_commit: prepared.repository.commit,
     baseline_sha256: prepared.baseline_sha256,
-    prepare_job_id: preparation.job.job_id,
     prepare_run_id: preparation.job.result.github_actions?.workflow_run_id,
-    verify_job_id: verification.job.job_id,
     verify_run_id: result.github_actions?.workflow_run_id,
     bridge_head_sha: result.github_actions?.head_sha,
     verification_status: repair.status,
@@ -119,13 +136,74 @@ async function main() {
     before_exit: repair.baseline.execution.exit_code,
     after_exit: repair.final_verification.execution.exit_code,
     patch_sha256: repair.patch_sha256,
-    artifact_digest: result.github_actions?.artifact_digest,
-    artifact_files: result.github_actions?.files,
-    artifact_url: result.github_actions?.html_url,
+    artifact_url: `https://github.com/wenjieding327/repo-rescue-mcp/actions/runs/${result.github_actions.workflow_run_id}`,
   }, null, 2)}\n`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`live bridge smoke failed: ${String(error?.message || error).slice(0, 1_000)}\n`);
+export function httpBridge(baseUrl, { token, fetchImpl = fetch, stderr = process.stderr } = {}) {
+  let base;
+  try { base = new URL(baseUrl); } catch { throw new Error("The deployed smoke target is invalid."); }
+  assert(base.protocol === "https:" && base.pathname === "/" && !base.username && !base.password && !base.search && !base.hash,
+    "The deployed smoke target must be an HTTPS origin without credentials.");
+  assert(typeof token === "string" && token.length >= 32 && token.length <= 4096 && /^[\x21-\x7e]+$/.test(token),
+    "The gateway credential is missing or invalid.");
+  async function call(name, args) {
+    try {
+      const response = await fetchImpl(new URL(`/api/tools/${name}`, base), {
+        method: "POST",
+        redirect: "error",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(args),
+        signal: AbortSignal.timeout(90000),
+      });
+      assert(response.status === 200 && response.redirected !== true, "HTTP tool call did not succeed.");
+      assert(/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || ""),
+        "HTTP tool call did not return JSON.");
+      const reader = response.body?.getReader();
+      assert(reader, "HTTP tool call returned no body.");
+      const chunks = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          assert(size <= MAX_HTTP_RESPONSE_BYTES, "HTTP tool response exceeded the limit.");
+          chunks.push(value);
+        }
+      } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      const envelope = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      assert(envelope.is_error === false, "The HTTP tool returned a protocol error.");
+      assert(typeof envelope.result_json === "string", "The HTTP tool returned an invalid envelope.");
+      const payload = JSON.parse(envelope.result_json);
+      assert((payload?.isError === undefined || payload.isError === false)
+        && Array.isArray(payload?.content) && payload.content.length === 1
+        && payload.content[0]?.type === "text" && typeof payload.content[0].text === "string",
+      "The HTTP tool returned an invalid MCP result.");
+      const result = JSON.parse(payload.content[0].text);
+      assert(result && typeof result === "object" && !Array.isArray(result) && typeof result.ok === "boolean",
+        "The HTTP tool returned an invalid job result.");
+      return result;
+    } catch {
+      // Network/JSON error messages may contain credentials or capability-bearing response data.
+      throw new Error("HTTP tool request failed.");
+    }
+  }
+  return {
+    start: async (stage, args) => {
+      assert(stage === "prepare", "Unexpected preparation stage.");
+      const refused = await call("start_prepare_github_repair", { repo_url: "https://github.com/example/not-allowed" });
+      assert(refused.ok === false && !refused.job, "A non-allowlisted repository was not rejected before dispatch.");
+      stderr.write("non-allowlist: rejected before dispatch\n");
+      return call("start_prepare_github_repair", args);
+    },
+    get: (job_id, wait_seconds) => call("get_repair_job", { job_id, wait_seconds }),
+    startVerify: (preparation_job_id, args) => call("start_verify_github_patch", { ...args, preparation_job_id }),
+  };
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main().catch(() => {
+  // Do not echo SDK/network errors, which can include request credentials.
+  process.stderr.write("live bridge smoke failed; no credentials or job capabilities were logged.\n");
   process.exitCode = 1;
 });

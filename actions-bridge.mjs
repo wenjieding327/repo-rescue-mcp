@@ -819,17 +819,19 @@ export class GitHubActionsBridge {
   async _pollOnce(job) {
     if (job.terminal) return;
     job.nextPollAt = 0;
-    if (this.now() - job.dispatchedAt > this.maxRunMs) {
+    if (this.now() - job.dispatchedAt >= this.maxRunMs) {
       throw new ActionsBridgeError("provider_timeout", "The GitHub Actions repair run exceeded its time limit.");
     }
     if (job.runId === null) {
       job.runId = await this._discoverLegacyRun(job);
+      if (job.terminal) return;
       if (job.runId === null) {
         job.status = "dispatch_unknown";
         return;
       }
     }
     const { value: run } = await this._request(`/repos/${this.repository}/actions/runs/${job.runId}`);
+    if (job.terminal) return;
     this._validateRun(job, run);
     const knownStatuses = new Set(["queued", "requested", "waiting", "pending", "in_progress", TERMINAL_RUN_STATUS]);
     if (!knownStatuses.has(run.status)) {
@@ -842,6 +844,12 @@ export class GitHubActionsBridge {
       return;
     }
     const result = await this._collectResult(job, run);
+    if (job.terminal) return;
+    // Artifact collection can outlive the run budget without another caller
+    // invoking _purge(). Do not accept a late completion as a fresh success.
+    if (this.now() - job.dispatchedAt >= this.maxRunMs) {
+      throw new ActionsBridgeError("provider_timeout", "The GitHub Actions repair run exceeded its time limit.");
+    }
     if (result === null) {
       if (job.firstArtifactMissAt === null) job.firstArtifactMissAt = this.now();
       if (this.now() - job.firstArtifactMissAt < 45_000) {
@@ -881,6 +889,7 @@ export class GitHubActionsBridge {
         job.lastPollAt = this.now();
         await this._pollOnce(job);
       } catch (error) {
+        if (job.terminal) return;
         if (error instanceof ActionsBridgeError && error.code === "provider_unavailable") {
           job.status = "poll_deferred";
           job.nextPollAt = this.now() + Math.max(this.minimumPollMs, error.retryAfterMs || 0);
@@ -906,22 +915,41 @@ export class GitHubActionsBridge {
     const job = this.jobs.get(jobId);
     if (!job) throw new ActionsBridgeError("unknown_job", "Unknown or expired repair job.");
     const deadline = this.now() + wait * 1_000;
-    do {
-      if (job.terminal) break;
-      const untilAllowed = Math.max(
-        0,
-        this.minimumPollMs - (this.now() - job.lastPollAt),
-        job.nextPollAt - this.now(),
-      );
-      if (untilAllowed > 0) {
-        if (wait === 0 || this.now() + untilAllowed > deadline) break;
-        await this.sleep(untilAllowed);
+    let expired = false;
+    const refresh = async () => {
+      do {
+        if (job.terminal || expired) break;
+        const untilAllowed = Math.max(
+          0,
+          this.minimumPollMs - (this.now() - job.lastPollAt),
+          job.nextPollAt - this.now(),
+        );
+        if (untilAllowed > 0) {
+          if (wait === 0 || this.now() + untilAllowed > deadline) break;
+          await this.sleep(untilAllowed);
+          if (expired || this.now() >= deadline) break;
+        }
+        await this._pollWithLock(job);
+        if (job.terminal || expired || wait === 0 || this.now() >= deadline) break;
+      } while (true);
+    };
+    if (wait === 0) {
+      // Preserve the existing non-long-poll contract: one eligible refresh.
+      await refresh();
+    } else {
+      let timer;
+      const budget = new Promise((resolve) => {
+        timer = setTimeout(() => { expired = true; resolve(); }, wait * 1_000);
+      });
+      try {
+        // Only stop this caller's wait. The shared, locked refresh keeps running,
+        // so a later caller can obtain its result without duplicate GitHub work.
+        await Promise.race([refresh(), budget]);
+      } finally {
+        expired = true;
+        clearTimeout(timer);
       }
-      await this._pollWithLock(job);
-      if (job.terminal || wait === 0 || this.now() >= deadline) break;
-      const remaining = deadline - this.now();
-      if (remaining <= 0) break;
-    } while (true);
+    }
     return this._snapshot(job);
   }
 }

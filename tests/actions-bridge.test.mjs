@@ -315,6 +315,249 @@ test("transient poll errors remain retryable and respect the same remote job", a
   assert.equal(completed.job.status, "succeeded");
 });
 
+function controlledClock(t) {
+  let now = FIXED_NOW;
+  let nextId = 1;
+  const timers = new Map();
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    const id = nextId++;
+    timers.set(id, { callback, at: now + Number(delay) });
+    return id;
+  });
+  t.mock.method(globalThis, "clearTimeout", (id) => timers.delete(id));
+  return {
+    now: () => now,
+    pending: () => timers.size,
+    tick(milliseconds) {
+      const target = now + milliseconds;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        now = next[1].at;
+        timers.delete(next[0]);
+        next[1].callback();
+      }
+      now = target;
+    },
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const settleMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
+
+for (const slowStage of ["run", "artifact"]) {
+  test(`positive long-poll budget returns at 15 seconds while a slow ${slowStage} request continues once`, async (t) => {
+    const clock = controlledClock(t);
+    const gate = deferred();
+    const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } });
+    let slowRequests = 0;
+    let slowSignal;
+    const bridge = bridgeWith(async (url, options) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith(slowStage === "run" ? `/actions/runs/${RUN_ID}` : `/actions/artifacts/${ARTIFACT_ID}/zip`)) {
+        slowRequests += 1;
+        slowSignal = options.signal;
+        await gate.promise;
+      }
+      return mock.fetchImpl(url, options);
+    }, { now: clock.now, requestTimeoutMs: 60_000, artifactTimeoutMs: 60_000 });
+    await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+    let returned = false;
+    const waiting = bridge.get(JOB_ID, 15).then((value) => { returned = true; return value; });
+    await settleMicrotasks();
+    assert.equal(slowRequests, 1);
+    clock.tick(14_999);
+    await settleMicrotasks();
+    assert.equal(returned, false);
+    clock.tick(1);
+    const snapshot = await waiting;
+    assert.equal(clock.now() - FIXED_NOW, 15_000);
+    assert.equal(snapshot.job.terminal, false);
+    assert.equal(snapshot.job.job_id, JOB_ID);
+    assert.ok(bridge.jobs.get(JOB_ID).pollPromise);
+    assert.equal(slowSignal.aborted, false);
+
+    // Another client joins the original refresh, without a new GitHub request.
+    const follower = bridge.get(JOB_ID, 15);
+    await settleMicrotasks();
+    assert.equal(slowRequests, 1);
+    gate.resolve();
+    const complete = await follower;
+    assert.equal(complete.job.status, "succeeded");
+    assert.equal(complete.job.result.preparation.status, "repair_ready");
+    assert.equal(bridge.jobs.get(JOB_ID).pollPromise, null);
+    assert.equal(mock.calls.filter((call) => call.url.pathname.endsWith("/dispatches")).length, 1);
+    assert.equal(slowRequests, 1);
+    assert.equal(clock.pending(), 0);
+  });
+}
+
+test("concurrent long polls have independent budgets and share the same locked refresh", async (t) => {
+  const clock = controlledClock(t);
+  const gate = deferred();
+  const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } });
+  let runRequests = 0;
+  const bridge = bridgeWith(async (url, options) => {
+    if (new URL(url).pathname.endsWith(`/actions/runs/${RUN_ID}`)) { runRequests += 1; await gate.promise; }
+    return mock.fetchImpl(url, options);
+  }, { now: clock.now, requestTimeoutMs: 60_000 });
+  await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+  const short = bridge.get(JOB_ID, 5);
+  const long = bridge.get(JOB_ID, 15);
+  clock.tick(250);
+  await settleMicrotasks();
+  assert.equal(runRequests, 1);
+  clock.tick(4_750);
+  assert.equal((await short).job.terminal, false);
+  assert.ok(bridge.jobs.get(JOB_ID).pollPromise);
+  gate.resolve();
+  assert.equal((await long).job.status, "succeeded");
+  assert.equal(runRequests, 1);
+  assert.equal(clock.pending(), 0);
+});
+
+test("zero wait preserves one eligible refresh and terminal reads do not schedule more work", async (t) => {
+  const clock = controlledClock(t);
+  const gate = deferred();
+  const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } });
+  let runRequests = 0;
+  const bridge = bridgeWith(async (url, options) => {
+    if (new URL(url).pathname.endsWith(`/actions/runs/${RUN_ID}`)) { runRequests += 1; await gate.promise; }
+    return mock.fetchImpl(url, options);
+  }, { now: clock.now, requestTimeoutMs: 60_000 });
+  await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+  let returned = false;
+  const waiting = bridge.get(JOB_ID, 0).then((value) => { returned = true; return value; });
+  clock.tick(15_000);
+  await settleMicrotasks();
+  assert.equal(returned, false);
+  gate.resolve();
+  assert.equal((await waiting).job.status, "succeeded");
+  assert.equal((await bridge.get(JOB_ID, 15)).job.status, "succeeded");
+  assert.equal(runRequests, 1);
+  assert.equal(clock.pending(), 0);
+});
+
+test("a poll due exactly at the budget boundary is not started after the caller expires", async (t) => {
+  const clock = controlledClock(t);
+  const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } });
+  const bridge = bridgeWith(mock.fetchImpl, { now: clock.now });
+  await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+  bridge.jobs.get(JOB_ID).nextPollAt = clock.now() + 15_000;
+  const waiting = bridge.get(JOB_ID, 15);
+  clock.tick(15_000);
+  assert.equal((await waiting).job.terminal, false);
+  await settleMicrotasks();
+  assert.equal(mock.calls.some((call) => call.url.pathname.endsWith(`/actions/runs/${RUN_ID}`)), false);
+  assert.equal(bridge.jobs.get(JOB_ID).pollPromise, null);
+  assert.equal(clock.pending(), 0);
+});
+
+test("a background poll rejection after the wait budget is recovered without losing the lock or redispatching", async (t) => {
+  const clock = controlledClock(t);
+  const gate = deferred();
+  const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } });
+  let failFirst = true;
+  const bridge = bridgeWith(async (url, options) => {
+    if (new URL(url).pathname.endsWith(`/actions/runs/${RUN_ID}`) && failFirst) {
+      failFirst = false;
+      await gate.promise;
+    }
+    return mock.fetchImpl(url, options);
+  }, { now: clock.now, requestTimeoutMs: 60_000 });
+  await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+  const waiting = bridge.get(JOB_ID, 15);
+  await settleMicrotasks();
+  clock.tick(15_000);
+  assert.equal((await waiting).job.terminal, false);
+  gate.reject(new Error("mock interrupted response"));
+  await settleMicrotasks();
+  assert.equal(bridge.jobs.get(JOB_ID).status, "poll_deferred");
+  assert.equal(bridge.jobs.get(JOB_ID).pollPromise, null);
+  clock.tick(250);
+  assert.equal((await bridge.get(JOB_ID, 0)).job.status, "succeeded");
+  assert.equal(mock.calls.filter((call) => call.url.pathname.endsWith("/dispatches")).length, 1);
+  assert.equal(clock.pending(), 0);
+});
+
+test("a late malformed result becomes a terminal failure and releases the shared refresh lock", async (t) => {
+  const clock = controlledClock(t);
+  const gate = deferred();
+  const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } }, { runPath: "wrong.yml" });
+  const bridge = bridgeWith(async (url, options) => {
+    if (new URL(url).pathname.endsWith(`/actions/runs/${RUN_ID}`)) await gate.promise;
+    return mock.fetchImpl(url, options);
+  }, { now: clock.now, requestTimeoutMs: 60_000 });
+  await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+  const waiting = bridge.get(JOB_ID, 15);
+  clock.tick(15_000);
+  assert.equal((await waiting).job.terminal, false);
+  gate.resolve();
+  await settleMicrotasks();
+  const failed = await bridge.get(JOB_ID, 15);
+  assert.equal(failed.job.status, "failed");
+  assert.equal(failed.job.result.status, "provider_protocol_error");
+  assert.equal(bridge.jobs.get(JOB_ID).pollPromise, null);
+  assert.equal(clock.pending(), 0);
+});
+
+test("late artifact completion cannot overwrite an already expired job's terminal failure", async (t) => {
+  const clock = controlledClock(t);
+  const gate = deferred();
+  const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } });
+  const bridge = bridgeWith(async (url, options) => {
+    if (new URL(url).pathname.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)) await gate.promise;
+    return mock.fetchImpl(url, options);
+  }, { now: clock.now, artifactTimeoutMs: 120_000, maxRunMs: 60_000 });
+  await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+  const waiting = bridge.get(JOB_ID, 15);
+  await settleMicrotasks();
+  clock.tick(15_000);
+  assert.equal((await waiting).job.terminal, false);
+  clock.tick(46_000);
+  const expired = await bridge.get(JOB_ID, 0);
+  assert.equal(expired.job.result.status, "provider_timeout");
+  gate.resolve();
+  await settleMicrotasks();
+  assert.equal(bridge.jobs.get(JOB_ID).status, "failed");
+  assert.equal(bridge.jobs.get(JOB_ID).result.status, "provider_timeout");
+  assert.equal(bridge.jobs.get(JOB_ID).pollPromise, null);
+  assert.equal(clock.pending(), 0);
+});
+
+test("artifact completion past the run deadline fails even when no caller purges the job", async (t) => {
+  const clock = controlledClock(t);
+  const gate = deferred();
+  const mock = successfulFetch({ ok: true, preparation: { status: "repair_ready" } });
+  const bridge = bridgeWith(async (url, options) => {
+    if (new URL(url).pathname.endsWith(`/actions/artifacts/${ARTIFACT_ID}/zip`)) await gate.promise;
+    return mock.fetchImpl(url, options);
+  }, { now: clock.now, artifactTimeoutMs: 120_000, maxRunMs: 60_000 });
+  await bridge.start("prepare", { repo_url: "https://github.com/example/project" });
+  const waiting = bridge.get(JOB_ID, 15);
+  await settleMicrotasks();
+  clock.tick(15_000);
+  assert.equal((await waiting).job.terminal, false);
+  clock.tick(46_000);
+  // No get/start/_purge between expiration and completion of the background work.
+  gate.resolve();
+  await settleMicrotasks();
+  assert.equal(bridge.jobs.get(JOB_ID).status, "failed");
+  assert.equal(bridge.jobs.get(JOB_ID).result.status, "provider_timeout");
+  const expired = await bridge.get(JOB_ID, 0);
+  assert.equal(expired.job.terminal, true);
+  assert.equal(expired.job.status, "failed");
+  assert.equal(expired.job.result.status, "provider_timeout");
+  assert.equal(bridge.jobs.get(JOB_ID).pollPromise, null);
+  assert.equal(clock.pending(), 0);
+});
+
 test("concurrent starts reserve capacity without sharing one caller's job capability", async () => {
   let dispatches = 0;
   let ids = 0;

@@ -12,6 +12,7 @@
 - `xfyun/test-evidence.md`：历史证据以及明确标注“尚未重新发布”的候选版测试附录。
 - `xfyun/restore.md`：从 GitHub 恢复讯飞 Agent 的步骤。
 - `xfyun/prompts-v4.md`、`xfyun/deployment-v4.md`：复赛候选配置与重新发布清单，不是历史线上配置。
+- `xfyun/prompts-http-v4.md`：HTTP 四插件目标提示词；当前采用该传输候选，配置说明与未完成验收见 `../docs/xfyun-http-agent-acceptance.md`。此文件不是平台导出或已发布证明。
 - `product/requirements.md`：持续维护的目标产品范围、交互、可信度和评审需求。
 - `product/positioning.md`：持续维护的市场定位、竞品差异和履历表述。
 - `product/strategy-comparison.md`：RepoRescue、兴趣类比讲解器和榜单产品的取舍。
