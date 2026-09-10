@@ -8,14 +8,16 @@
 
 | 讯飞个人插件 | JSON POST 路径 | 必须显式提供的 Body 字段 |
 | --- | --- | --- |
-| `rescue_snippet` | `/api/tools/rescue_python_snippet` | `original_code`, `candidate_code`, `test_cases` |
+| `rescue_snippet` | `/api/tools/rescue_python_snippet` | `original_code`, `candidate_code`, `test_cases`（JSON 数组文本） |
 | `rescue_prepare` | `/api/tools/start_prepare_github_repair` | `repo_url` |
 | `rescue_poll` | `/api/tools/get_repair_job` | `job_id`, `wait_seconds`（15） |
-| `rescue_verify` | `/api/tools/start_verify_github_patch` | `repo_url`, `preparation_job_id`, `expected_commit`, `expected_baseline_sha256`, `analysis`, `changes` |
+| `rescue_verify` | `/api/tools/start_verify_github_patch` | `repo_url`, `preparation_job_id`, `expected_commit`, `expected_baseline_sha256`, `analysis`, `changes`（JSON 数组文本） |
 
 每个插件使用 Service > Header，参数名 `Authorization`；值是独立网关凭据的 Bearer 认证，不是 GitHub PAT。不把凭据放入 Prompt、URL、参数默认值、截图或文件。GitHub Actions 凭据仅在 Railway 注入。
 
 响应字段是 `is_error` 与 `result_json`。后者先解析为 MCP 返回，再解析其中 `content[0].text` 才得到业务证据。HTTP 200、`is_error=false` 和 `job.status=succeeded` 均不能独立证明修复。
+
+为规避讯飞个人插件的嵌套对象默认值编辑与参数预览问题，HTTP 候选合同把 `test_cases` 和 `changes` 设置为无默认值的 String；内容必须是合法 JSON 数组文本。只有这两个指定路由字段会在通过原有鉴权与请求大小检查后解析一次，再交原始工具验证；原生数组客户端继续兼容，stdio/SSE 不进行此转换。解析失败或结果不是数组时返回受控参数错误，不解释为工具执行结果。此段是待验收配置要求，不代表平台已保存并通过。
 
 ## 配置核对
 
@@ -50,3 +52,7 @@
 代码复核实证发现：旧 `get_repair_job(wait_seconds=15)` 会等待整个远程刷新，模拟 31 秒远程延迟时实际等待 31 秒。候选修复使正数 wait 成为调用者等待预算，预算到期返回当前快照，后台刷新共享锁继续；不取消作业、不重复 dispatch，且晚结果不能越过总任务截止时间。`wait_seconds=0` 为兼容保留一次符合限频条件的刷新，并非零等待保证。此缺陷已被独立定位，但缺少平台 trace，不能断言它就是这次 Agent 中断的唯一原因。
 
 平台草稿另已追加明确的后端 MCP 名称到 HTTP 插件名称映射，避免 `job.poll_tool=get_repair_job` 与实际 `rescue_poll` 冲突；不修改原始证据、哈希或报告。该提示词修改不是发布证明。部署修复后仍须从新对话重新完成全部验收，不复用本轮过期 capability。
+
+轮询修复已通过 main `d00d87285c6339e0bb57f75adc4c9c6fb6df314b` 的 CI [34442858023](https://github.com/wenjieding327/repo-rescue-mcp/actions/runs/34442858023)（Docker、Ubuntu、Windows 全部成功），部署 `63d2d018-6b94-4c3d-bd2b-5a78f197bef4` 状态 SUCCESS，`/healthz` 返回 ok=true；这只是后端部署证据，不能取代主 Agent 验收。
+
+另在点击片段插件参数预览时，浏览器控制台于 05:50:11Z 记录 React render error #31，指出对象键 `{name, expected_stdout}`，页面随即白屏。默认值编辑器里的 output/0 单字段清空及移除数组示例后，重新加载仍见旧值，因此未记录清理通过。后续采用上述 HTTP JSON 文本合同，必须重新验证持久化配置、真实工具调用和 Agent 自主流程。该前端异常与 CUA 请求超时、GitHub 轮询超时是三类不同现象，不能统称 VPN 故障。

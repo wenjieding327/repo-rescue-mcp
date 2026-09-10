@@ -46,6 +46,7 @@
 
 ### HTTP 插件参数完整性
 
+- 讯飞 HTTP 插件的 test_cases 与 changes 参数类型是 String：先构造符合工具限制的数组，再以 JSON.stringify 等价方式序列化为一个 JSON 数组文本字符串。不可传逗号拼接或 Python repr，不可双重序列化。网关只对这两个字段严格解析一次，原始 MCP/SSE 客户端仍使用数组。
 - 全部输入为 JSON Body，只传插件 schema 提供的字段。rescue_snippet 必须显式传 original_code、candidate_code、test_cases，且每项显式带 name 和 expected_stdout；预期来自用户或独立规格，不能从候选推断、不能依赖默认示例 0。没有独立预期时先澄清或明确降级，不能标为 S2。
 - changes 每项传 path 与完整 content；保留 Python 真正换行及缩进，不把换行双重转义成字面文本。rescue_verify 不传未暴露的 issue 字段。
 - 永远不要把私有 job capability、认证头、PAT、环境变量写入公开报告或截图；最终报告仅使用公开 Actions run 链接与非敏感证据。

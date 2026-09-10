@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { request as httpRequest } from "node:http";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createLegacySseServer } from "../http-sse-server.mjs";
 
 const ACCESS_TOKEN = "test-only-access-token-with-at-least-32-bytes";
@@ -13,10 +16,10 @@ async function postTool(baseUrl, name, args, headers = {}) {
   });
 }
 
-async function httpToolPayload(response) {
+async function httpToolPayload(response, expectedIsError = false) {
   assert.equal(response.status, 200);
   const envelope = await response.json();
-  assert.equal(envelope.is_error, false);
+  assert.equal(envelope.is_error, expectedIsError);
   const mcpResult = JSON.parse(envelope.result_json);
   return JSON.parse(mcpResult.content[0].text);
 }
@@ -127,6 +130,8 @@ test("the HTTP transport exposes exactly the reviewed four-tool platform surface
     reply.data.result.tools.map((tool) => tool.name),
     ["rescue_python_snippet", "start_prepare_github_repair", "get_repair_job", "start_verify_github_patch"],
   );
+  assert.equal(reply.data.result.tools[0].inputSchema.properties.test_cases.type, "array");
+  assert.equal(reply.data.result.tools[3].inputSchema.properties.changes.type, "array");
 });
 
 test("message POSTs reject wrong credentials, content types, and unknown sessions", async (t) => {
@@ -245,6 +250,124 @@ test("HTTP plugins preserve real snippet repair and unsafe import evidence", { t
   }));
   assert.equal(rejected.fix_verified, false);
   assert.match(JSON.stringify(rejected), /PermissionError/);
+});
+
+test("HTTP snippet JSON-string cases preserve independent-oracle execution and missing-oracle failure", { timeout: 60000 }, async (t) => {
+  const { baseUrl } = await startServer(t);
+  const args = { original_code: "numbers = [1, 2, 3]\nprint(numbers[3])", candidate_code: "numbers = [1, 2, 3]\nprint(numbers[2])" };
+  const fixed = await httpToolPayload(await postTool(baseUrl, "rescue_python_snippet", {
+    ...args, test_cases: JSON.stringify([{ name: "index", expected_stdout: "3" }]),
+  }));
+  assert.equal(fixed.fix_verified, true);
+  assert.equal(fixed.before_failed, true);
+  assert.equal(fixed.case_counts.executed, 1);
+  assert.equal(fixed.test_results[0].after.stdout, "3\n");
+  const unverified = await httpToolPayload(await postTool(baseUrl, "rescue_python_snippet", {
+    ...args, test_cases: JSON.stringify([{ name: "no-oracle" }]),
+  }));
+  assert.equal(unverified.fix_verified, false);
+  assert.equal(unverified.oracle_backed, false);
+});
+
+test("HTTP JSON-array conversion rejects malformed or non-array strings without echoing caller content", async (t) => {
+  const { baseUrl } = await startServer(t);
+  for (const [name, field] of [["rescue_python_snippet", "test_cases"], ["start_verify_github_patch", "changes"]]) {
+    for (const encoded of ["invalid-SECRET-SENTINEL", "{}", "null", "true", "1", '"[]"']) {
+      const result = await postTool(baseUrl, name, { [field]: encoded });
+      assert.equal(result.status, 400);
+      assert.deepEqual(await result.json(), { ok: false, error: "argument_must_be_a_json_array", field });
+    }
+    assert.equal((await postTool(baseUrl, name, { [field]: "[".repeat(2 * 1024 * 1024) })).status, 413);
+    assert.equal((await postTool(baseUrl, name, { [field]: "[]" }, { Authorization: "" })).status, 401);
+  }
+  assert.equal((await fetch(`${baseUrl}/healthz`)).status, 200);
+});
+
+test("decoded snippet cases still reach the original metadata and case-count validator", async (t) => {
+  const { baseUrl } = await startServer(t);
+  for (const cases of [[null], [{ expected_stdout: {} }], Array.from({ length: 5 }, () => ({ name: "case" }))]) {
+    const result = await httpToolPayload(await postTool(baseUrl, "rescue_python_snippet", {
+      original_code: "print(1 / 0)", candidate_code: "print(0)", test_cases: JSON.stringify(cases),
+    }));
+    assert.equal(result.status, "invalid_request");
+    assert.equal(result.fix_verified, false);
+    assert.equal(result.case_counts.executed, 0);
+  }
+});
+
+test("SSE requests keep the native-array contract and never apply HTTP string conversion", async (t) => {
+  const { baseUrl } = await startServer(t);
+  const session = await openSession(baseUrl);
+  t.after(() => session.controller.abort());
+  const endpoint = (await session.nextEvent()).data;
+  await postRpc(baseUrl, endpoint, {
+    jsonrpc: "2.0", id: 71, method: "tools/call", params: {
+      name: "rescue_python_snippet", arguments: {
+        original_code: "print(1 / 0)", candidate_code: "print(0)",
+        test_cases: JSON.stringify([{ name: "explicit", expected_stdout: "0" }]),
+      },
+    },
+  });
+  const result = JSON.parse((await session.nextEvent()).data.result.content[0].text);
+  assert.equal(result.status, "invalid_request");
+  assert.equal(result.case_counts.executed, 0);
+  assert.match(result.error, /test_cases must be an array/);
+});
+
+test("HTTP verify string changes reach unchanged preflight, cannot inject tool selection, and keep native arrays compatible", async (t) => {
+  const { baseUrl } = await startServer(t, { REPO_RESCUE_GITHUB_TOKEN: "mock-only-token-for-local-preflight-no-network" });
+  const args = {
+    repo_url: "https://github.com/wenjieding327/repo-rescue-canary", preparation_job_id: "N".repeat(43),
+    expected_commit: "a".repeat(40), expected_baseline_sha256: "b".repeat(64),
+    changes: [{ path: "src/repo_rescue_canary/parser.py", content: "def normalize_title(value):\n    return value.strip() or 'untitled'\n" }],
+  };
+  const original = await httpToolPayload(await postTool(baseUrl, "start_verify_github_patch", args), true);
+  const converted = await httpToolPayload(await postTool(baseUrl, "start_verify_github_patch", {
+    ...args, changes: JSON.stringify(args.changes),
+  }), true);
+  assert.deepEqual(converted, original);
+  assert.equal(converted.ok, false);
+  assert.equal(converted.status, "preparation_required");
+  assert.equal(converted.job, undefined);
+  const rejected = await httpToolPayload(await postTool(baseUrl, "start_verify_github_patch", {
+    ...args, changes: JSON.stringify([{ path: "src/app.py", content: "fixed", method: "tools/list" }]),
+  }));
+  assert.equal(rejected.status, "invalid_request");
+  const injected = await postTool(baseUrl, "start_verify_github_patch", {
+    ...args, changes: JSON.stringify(args.changes), method: "tools/list", params: { name: "windows_environment_probe" },
+  });
+  const injectedEnvelope = await injected.json();
+  assert.equal(JSON.parse(JSON.parse(injectedEnvelope.result_json).content[0].text).status, "invalid_request");
+  assert.doesNotMatch(injectedEnvelope.result_json, /inputSchema/);
+  assert.equal((await postTool(baseUrl, "windows_environment_probe", { changes: "[]" })).status, 404);
+  const wrongRoute = await httpToolPayload(await postTool(baseUrl, "get_repair_job", { job_id: "N".repeat(43), changes: "not JSON" }));
+  assert.equal(wrongRoute.status, "invalid_request");
+  assert.match(wrongRoute.message, /Job polling accepts only/);
+});
+
+test("HTTP contracts alone use JSON strings for the two nested fields, with no default oracle", { timeout: 15000 }, () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const environment = {};
+  for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE"]) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  execFileSync(process.execPath, [fileURLToPath(new URL("../scripts/build-http-plugin-contracts.mjs", import.meta.url))], {
+    cwd: root, env: environment, timeout: 10000, windowsHide: true,
+  });
+  for (const [title, tool, field] of [
+    ["rescue_snippet", "rescue_python_snippet", "test_cases"],
+    ["rescue_verify", "start_verify_github_patch", "changes"],
+  ]) {
+    const contract = JSON.parse(readFileSync(new URL(`../dist/http-plugins/${title}.json`, import.meta.url), "utf8"));
+    const post = contract.paths[`/api/tools/${tool}`].post;
+    const schema = post.requestBody.content["application/json"].schema.properties[field];
+    assert.equal(schema.type, "string");
+    assert.equal(Object.hasOwn(schema, "default"), false);
+    assert.equal(Object.hasOwn(schema, "items"), false);
+    assert.match(schema.description, /JSON-encoded array/);
+    assert.equal(post.operationId, title);
+    assert.deepEqual(post.responses["200"].content["application/json"].schema.required, ["is_error", "result_json"]);
+  }
 });
 
 test("HTTP plugin repo tools fail closed and never interpret HTTP 200 as repair success", async (t) => {
