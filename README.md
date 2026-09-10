@@ -78,15 +78,15 @@ node .\platform-entry.mjs
 
 For compatibility the default Node launcher keeps the legacy four-tool surface, but `reproduce_python_project` never clones or executes repository code there. Set `REPO_RESCUE_NODE_TOOLSET=snippet` for snippet-only hosting. The dedicated `repo-rescue-mcp-platform` bin is the competition entrypoint: it unconditionally fixes the reviewed toolset, control repository, workflow, protected ref, two-repository allow-list, rates, timeouts, and snippet budget in code. Discovery then contains exactly `rescue_python_snippet`, `start_prepare_github_repair`, `get_repair_job`, and `start_verify_github_patch`, while direct calls to hidden legacy tools fail closed.
 
-### XFYun-hosted full repair through GitHub Actions
+### XFYun Agent repair through an authenticated HTTP gateway
 
-The `platform` toolset keeps the lightweight stdio MCP on XFYun and moves only the long, untrusted repository run to an Ubuntu GitHub runner:
+The current integration candidate uses four XFYun personal HTTP plugins, not the failed XFYun-hosted MCP runner. A single-replica Node gateway on Railway hosts the reviewed `platform` stdio worker; the long, untrusted repository run executes on an Ubuntu GitHub runner. Platform **tool-level** tests passed on 2026-09-09; autonomous Agent acceptance and publication are still pending. See [deployment evidence](docs/external-mcp-deployment.md) and the [current integration checklist](docs/xfyun-http-agent-acceptance.md).
 
 ```text
-XFYun model → Node stdio start tool → GitHub workflow_dispatch
+XFYun model → authenticated HTTP plugin → Node platform worker → GitHub workflow_dispatch
              → pinned workflow checkout → fixed verifier Docker image
              → Python v0.4 prepare/verify → bound artifact ZIP
-XFYun model ← Node poll tool ← result.json + repair.patch + evidence.json + report.md
+XFYun model ← rescue_poll HTTP plugin ← result.json + repair.patch + evidence.json + report.md
 ```
 
 Generic self-hosting can configure the standard launcher with administrator-owned values; none of them is accepted as a tool argument:
@@ -100,7 +100,9 @@ REPO_RESCUE_ACTIONS_REF=<protected branch containing the reviewed workflow>
 REPO_RESCUE_ALLOWED_REPOS=wenjieding327/repo-rescue-canary,wenjieding327/repo-rescue-mcp
 ```
 
-For the XFYun competition deployment, use command `npx` with arguments `-y https://github.com/wenjieding327/repo-rescue-mcp/releases/download/v0.4.1-xfyun.1/repo-rescue-mcp-platform-0.4.1-xfyun.1.tgz`, and declare only `REPO_RESCUE_GITHUB_TOKEN` as an environment variable **without a default value**. Enter that value only when the private MCP is linked to the team's APPID. Do not place a PAT in the hosting form's default-value preview. This adapter archive has exactly one default bin, so XFYun does not need `--package` or a separate command name; `npm run pack:xfyun` builds it and `npm run verify:xfyun` executes the resulting tgz, checks the nine-file allow-list, discovers exactly four platform tools, rejects hidden tools, and fails closed without a token. The platform entrypoint supplies and locks every reviewed non-secret repository, workflow, allow-list, rate-limit, timeout, and toolset value.
+For the current candidate, deploy `http-sse-server.mjs` using `Dockerfile.railway`, inject separate gateway and repository credentials in Railway, and configure the four XFYun plugins with Service/Header authentication. XFYun receives only the dedicated gateway credential; the GitHub credential stays in Railway. Inputs use JSON Body, not Query. HTTP 200 and `is_error=false` are transport results, never repair verdicts. See [the exact plugin mapping and acceptance gates](docs/xfyun-http-agent-acceptance.md).
+
+The earlier XFYun-hosted MCP alternative is retained for recovery, not claimed operational: command `npx`, arguments `-y https://github.com/wenjieding327/repo-rescue-mcp/releases/download/v0.4.1-xfyun.1/repo-rescue-mcp-platform-0.4.1-xfyun.1.tgz`. `npm run pack:xfyun` and `npm run verify:xfyun` still audit and execute the single-bin archive locally. Local package success does not prove XFYun runner startup. Do not rebind or retransmit credentials merely to retry this historical alternative.
 
 The fine-grained token is restricted to the one bridge repository with **Actions read/write**; RepoRescue does not need Contents, Workflows, Administration, or a model API key on that token. The Node and workflow allow-lists must be identical. The trusted workflow has its own fixed allow-list, builds `repo-rescue-python:3.11`, clears `GITHUB_TOKEN`/`GH_TOKEN` for the controller step, and never adds a credential to the untrusted Docker container.
 
