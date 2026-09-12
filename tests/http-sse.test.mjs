@@ -4,9 +4,36 @@ import { request as httpRequest } from "node:http";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { createLegacySseServer } from "../http-sse-server.mjs";
+import { createLegacySseServer, httpToolEnvelope } from "../http-sse-server.mjs";
 
 const ACCESS_TOKEN = "test-only-access-token-with-at-least-32-bytes";
+
+test("HTTP delivery mints only terminal verify receipts and preserves the complete original MCP result", () => {
+  const result = { ok: true, repair: { verified_repair: true }, github_actions: {} };
+  const value = { ok: true, job: { terminal: true, status: "succeeded", operation: "verify_github_patch", result } };
+  const makeMessage = (payload) => ({ result: { content: [{ type: "text", text: JSON.stringify(payload) }], isError: false } });
+  const message = makeMessage(value);
+  let calls = 0;
+  const receipts = { mint: (actual) => { calls++; assert.deepEqual(actual, result); return "https://receipts.example/r/signed"; } };
+  const envelope = httpToolEnvelope(message, "get_repair_job", receipts);
+  assert.equal(envelope.result_json, JSON.stringify(message.result));
+  assert.equal(envelope.receipt_url, "https://receipts.example/r/signed");
+  assert.equal(envelope.is_error, false);
+  for (const operation of ["rescue_python_snippet", "start_verify_github_patch", "start_prepare_github_repair"]) {
+    assert.equal(httpToolEnvelope(message, operation, receipts).receipt_url, "");
+  }
+  for (const job of [
+    { ...value.job, terminal: false }, { ...value.job, status: "failed" },
+    { ...value.job, operation: "prepare_github_repair" },
+  ]) assert.equal(httpToolEnvelope(makeMessage({ ...value, job }), "get_repair_job", receipts).receipt_url, "");
+  assert.equal(httpToolEnvelope(makeMessage({ ...value, ok: false }), "get_repair_job", receipts).receipt_url, "");
+  assert.equal(httpToolEnvelope({ ...message, error: { code: -1, message: "failed" } }, "get_repair_job", receipts).receipt_url, "");
+  assert.equal(httpToolEnvelope({ result: { content: [{ type: "text", text: "invalid" }] } }, "get_repair_job", receipts).receipt_url, "");
+  assert.equal(calls, 1);
+  const unavailable = httpToolEnvelope(message, "get_repair_job", { mint() { throw new Error("unavailable"); } });
+  assert.equal(unavailable.receipt_url, "");
+  assert.equal(unavailable.result_json, envelope.result_json);
+});
 
 async function postTool(baseUrl, name, args, headers = {}) {
   return fetch(`${baseUrl}/api/tools/${name}`, {
@@ -366,7 +393,8 @@ test("HTTP contracts alone use JSON strings for the two nested fields, with no d
     assert.equal(Object.hasOwn(schema, "items"), false);
     assert.match(schema.description, /JSON-encoded array/);
     assert.equal(post.operationId, title);
-    assert.deepEqual(post.responses["200"].content["application/json"].schema.required, ["is_error", "result_json"]);
+    assert.deepEqual(post.responses["200"].content["application/json"].schema.required, ["is_error", "result_json", "receipt_url"]);
+    assert.equal(post.responses["200"].content["application/json"].schema.properties.receipt_url.type, "string");
   }
 });
 

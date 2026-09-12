@@ -7,6 +7,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY http-sse-server.mjs platform-entry.mjs stdio-server.mjs ./
+COPY artifact-receipts.mjs ./
 COPY actions-bridge.mjs snippet-pair.mjs snippet-worker-env.mjs snippet-worker.mjs ./
 
 USER node

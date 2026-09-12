@@ -74,9 +74,10 @@ try {
         security: [{ bearerAuth: [] }],
         requestBody: { required: true, content: { "application/json": { schema: inputSchema } } },
         responses: { "200": { description: "Original MCP evidence. HTTP 200 does not imply repair success.", content: {
-          "application/json": { schema: { type: "object", required: ["is_error", "result_json"], properties: {
+          "application/json": { schema: { type: "object", required: ["is_error", "result_json", "receipt_url"], properties: {
             is_error: { type: "boolean", description: "MCP protocol/tool error indicator, not repair verification status" },
             result_json: { type: "string", description: "Complete original MCP result JSON. Parse content[0].text for tool evidence; only its verification fields justify success." },
+            receipt_url: { type: "string", description: "Read-only original artifact receipt. Non-empty only for a successfully verified terminal repository repair. Return this exact URL to the user instead of retyping patches or hashes; empty means no receipt is available." },
           } } },
         } } },
       } } },

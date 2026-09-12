@@ -4,6 +4,8 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { GitHubActionsBridge } from "./actions-bridge.mjs";
+import { createArtifactReceipts } from "./artifact-receipts.mjs";
 
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
@@ -18,6 +20,7 @@ const STARTUP_TIMEOUT_MS = 10_000;
 const PLATFORM_ENTRY = fileURLToPath(new URL("./platform-entry.mjs", import.meta.url));
 const PREFLIGHT_INITIALIZE_ID = "repo-rescue-preflight-initialize";
 const PREFLIGHT_TOOLS_ID = "repo-rescue-preflight-tools";
+const DEFAULT_PUBLIC_ORIGIN = "https://reporescue-mcp-production.up.railway.app";
 const REQUIRED_TOOL_NAMES = Object.freeze([
   "rescue_python_snippet",
   "start_prepare_github_repair",
@@ -62,6 +65,28 @@ function sendJson(response, statusCode, value) {
     "X-Content-Type-Options": "nosniff",
   });
   response.end(body);
+}
+
+// Delivery is separate from the unmodified MCP evidence. The model only needs
+// to relay this URL; it must not reconstruct the original patch or its hashes.
+export function httpToolEnvelope(message, toolName, receipts) {
+  let receiptUrl = "";
+  if (toolName === "get_repair_job" && !message.error && !message.result?.isError) {
+    try {
+      const content = message.result?.content;
+      const value = Array.isArray(content) && content.length === 1 && content[0]?.type === "text"
+        ? JSON.parse(content[0].text) : null;
+      if (value?.ok === true && value.job?.terminal === true
+        && value.job.status === "succeeded" && value.job.operation === "verify_github_patch") {
+        receiptUrl = receipts.mint(value.job.result);
+      }
+    } catch { /* Missing delivery evidence must never turn into a success URL. */ }
+  }
+  return {
+    is_error: Boolean(message.error || message.result?.isError),
+    result_json: JSON.stringify(message.error ? { error: message.error } : message.result),
+    receipt_url: receiptUrl,
+  };
 }
 
 function sseEvent(response, event, data) {
@@ -173,6 +198,19 @@ export function createLegacySseServer({
   port = configuredPort(environment.PORT),
   accessToken = configuredAccessToken(environment.REPO_RESCUE_HTTP_ACCESS_TOKEN),
 } = {}) {
+  const artifactReader = String(environment.REPO_RESCUE_GITHUB_TOKEN || "").trim()
+    ? new GitHubActionsBridge({
+      token: environment.REPO_RESCUE_GITHUB_TOKEN,
+      allowedRepositories: ["wenjieding327/repo-rescue-canary", "wenjieding327/repo-rescue-mcp"],
+    }) : null;
+  const receipts = createArtifactReceipts({
+    signingKey: accessToken,
+    publicOrigin: environment.REPO_RESCUE_PUBLIC_ORIGIN || DEFAULT_PUBLIC_ORIGIN,
+    loadArtifact: (identity) => {
+      if (!artifactReader) throw new Error("Artifact delivery is unavailable.");
+      return artifactReader.loadVerifiedArtifact(identity);
+    },
+  });
   const sessions = new Map();
   const pending = new Map();
   let globalRequests = [];
@@ -191,10 +229,7 @@ export function createLegacySseServer({
       if (!item.httpResponse.destroyed && !item.httpResponse.writableEnded) {
         // Keep the entire original MCP result as evidence. Do not reinterpret
         // HTTP success as a verified repair or manufacture tool status fields.
-        sendJson(item.httpResponse, httpStatus, {
-          is_error: Boolean(message.error || message.result?.isError),
-          result_json: JSON.stringify(message.error ? { error: message.error } : message.result),
-        });
+        sendJson(item.httpResponse, httpStatus, httpToolEnvelope(message, item.toolName, receipts));
       }
       return;
     }
@@ -420,6 +455,7 @@ export function createLegacySseServer({
         timer.unref();
         pending.set(internalId, {
           sessionId, originalId: message.id, timer,
+          toolName,
           httpResponse: toolName ? response : null,
         });
       }
@@ -450,7 +486,16 @@ export function createLegacySseServer({
   }
 
   const server = createServer((request, response) => {
-    // This private endpoint serves server-to-server MCP clients, not web pages.
+    // Read-only signed receipts are the sole browser-facing surface. Execution
+    // endpoints retain their independent bearer authentication and Origin guard.
+    if (String(request.url || "").startsWith("/r/")) {
+      receipts.handle(request, response).catch(() => {
+        if (!response.headersSent && !response.destroyed) {
+          sendJson(response, 503, { ok: false, error: "artifact_unavailable" });
+        } else response.destroy();
+      });
+      return;
+    }
     if (request.headers.origin !== undefined) {
       sendJson(response, 403, { ok: false, error: "browser_origin_not_allowed" });
       return;
@@ -527,6 +572,7 @@ export function createLegacySseServer({
       closeSessions();
       failPending("The MCP service is shutting down.");
       platform.stop();
+      receipts.close?.();
       await new Promise((resolve) => server.close(() => resolve()));
     },
   };
