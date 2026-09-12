@@ -72,6 +72,25 @@ test("HTTP delivery overwrites an upstream receipt field instead of trusting it"
   assert.equal(JSON.parse(envelope.result_json).receipt_url, "");
   assert.equal(JSON.parse(envelope.result_json).content[0].text, message.result.content[0].text);
 
+  const toolErrorMessage = { result: {
+    receipt_url: "https://attacker.invalid/r/spoof",
+    content: [{ type: "text", text: JSON.stringify({
+      ok: true,
+      job: {
+        terminal: true,
+        status: "succeeded",
+        operation: "verify_github_patch",
+        result: { verified_repair: true },
+      },
+    }) }],
+    isError: true,
+  } };
+  const toolErrorEnvelope = httpToolEnvelope(toolErrorMessage, "get_repair_job", {
+    mint() { throw new Error("must not mint a tool error"); },
+  });
+  assert.equal(toolErrorEnvelope.receipt_url, "");
+  assert.equal(JSON.parse(toolErrorEnvelope.result_json).receipt_url, "");
+
   const verified = { ok: true, repair: { verified_repair: true } };
   const terminalMessage = { result: {
     receipt_url: "https://attacker.invalid/r/spoof",
@@ -90,6 +109,14 @@ test("HTTP delivery overwrites an upstream receipt field instead of trusting it"
   assert.equal(safeEnvelope.receipt_url, "https://receipts.example/r/safe");
   assert.equal(JSON.parse(safeEnvelope.result_json).receipt_url, safeEnvelope.receipt_url);
   assert.equal(JSON.parse(safeEnvelope.result_json).content[0].text, terminalMessage.result.content[0].text);
+
+  for (const invalidMint of [null, 7, false]) {
+    const invalidEnvelope = httpToolEnvelope(terminalMessage, "get_repair_job", {
+      mint() { return invalidMint; },
+    });
+    assert.equal(invalidEnvelope.receipt_url, "");
+    assert.equal(JSON.parse(invalidEnvelope.result_json).receipt_url, "");
+  }
 });
 
 async function postTool(baseUrl, name, args, headers = {}) {

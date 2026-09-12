@@ -79,7 +79,8 @@ export function httpToolEnvelope(message, toolName, receipts) {
         ? JSON.parse(content[0].text) : null;
       if (value?.ok === true && value.job?.terminal === true
         && value.job.status === "succeeded" && value.job.operation === "verify_github_patch") {
-        receiptUrl = receipts.mint(value.job.result);
+        const minted = receipts.mint(value.job.result);
+        receiptUrl = typeof minted === "string" ? minted : "";
       }
     } catch { /* Missing delivery evidence must never turn into a success URL. */ }
   }
