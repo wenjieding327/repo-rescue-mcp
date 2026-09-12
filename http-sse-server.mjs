@@ -67,8 +67,9 @@ function sendJson(response, statusCode, value) {
   response.end(body);
 }
 
-// Delivery is separate from the unmodified MCP evidence. The model only needs
-// to relay this URL; it must not reconstruct the original patch or its hashes.
+// Delivery is separate from the MCP evidence. Existing MCP fields and content
+// remain unchanged; the gateway adds only its reserved receipt mirror. The
+// model must relay that URL instead of reconstructing patches or hashes.
 export function httpToolEnvelope(message, toolName, receipts) {
   let receiptUrl = "";
   if (toolName === "get_repair_job" && !message.error && !message.result?.isError) {
@@ -78,13 +79,22 @@ export function httpToolEnvelope(message, toolName, receipts) {
         ? JSON.parse(content[0].text) : null;
       if (value?.ok === true && value.job?.terminal === true
         && value.job.status === "succeeded" && value.job.operation === "verify_github_patch") {
-        receiptUrl = receipts.mint(value.job.result);
+        const minted = receipts.mint(value.job.result);
+        receiptUrl = typeof minted === "string" ? minted : "";
       }
     } catch { /* Missing delivery evidence must never turn into a success URL. */ }
   }
+  const originalResult = message.error ? { error: message.error } : message.result;
+  // Older XFYun plugin schemas expose only result_json. Mirror the gateway-
+  // minted receipt inside that declared string without changing any existing
+  // MCP result field or content value. The reserved field is written last so
+  // an upstream value can never spoof a receipt capability.
+  const compatibleResult = originalResult && typeof originalResult === "object" && !Array.isArray(originalResult)
+    ? { ...originalResult, receipt_url: receiptUrl }
+    : originalResult;
   return {
     is_error: Boolean(message.error || message.result?.isError),
-    result_json: JSON.stringify(message.error ? { error: message.error } : message.result),
+    result_json: JSON.stringify(compatibleResult),
     receipt_url: receiptUrl,
   };
 }

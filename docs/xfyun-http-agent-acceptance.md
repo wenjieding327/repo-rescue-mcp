@@ -15,7 +15,7 @@
 
 每个插件使用 Service > Header，参数名 `Authorization`；值是独立网关凭据的 Bearer 认证，不是 GitHub PAT。不把凭据放入 Prompt、URL、参数默认值、截图或文件。GitHub Actions 凭据仅在 Railway 注入。
 
-响应字段是 `is_error` 与 `result_json`。后者先解析为 MCP 返回，再解析其中 `content[0].text` 才得到业务证据。HTTP 200、`is_error=false` 和 `job.status=succeeded` 均不能独立证明修复。
+现有星辰插件声明并展示的响应字段是 `is_error` 与 `result_json`；新导入合同另声明顶层 `receipt_url`。网关把同一只读收据链接镜像到 `result_json` 解析结果的根级 `receipt_url`，因此旧插件无需修改资源定义也能交付原始文件；若外层字段可见，两处必须完全一致。镜像是保留的附加网关字段，不改变已有 MCP 字段或 `content[0].text`。先解析 `result_json` 为 MCP 返回，再解析其中 `content[0].text` 才得到业务证据。HTTP 200、`is_error=false`、非空收据链接和 `job.status=succeeded` 均不能独立证明修复。
 
 为规避讯飞个人插件的嵌套对象默认值编辑与参数预览问题，HTTP 候选合同把 `test_cases` 和 `changes` 设置为无默认值的 String；内容必须是合法 JSON 数组文本。只有这两个指定路由字段会在通过原有鉴权与请求大小检查后解析一次，再交原始工具验证；原生数组客户端继续兼容，stdio/SSE 不进行此转换。解析失败或结果不是数组时返回受控参数错误，不解释为工具执行结果。2026-09-10 两插件已按此合同保存并同步工作流，详见下文；配置保存与后台修复成功均不代表完整 Agent 验收通过。
 
@@ -38,7 +38,7 @@
 
 - 核心执行与安全回归通过，非白名单和危险片段拒绝、缺少独立预期不冒称已验证。
 - 一次新平台自主 prepare → poll → verify → poll，绑定相同源提交、基线和验证命令，真实先失败后通过，保留工具轨迹。
-- 最终链接来自后端；下载原始 result/patch/evidence/report，字节与原始 ZIP 一致，记录 SHA、失效时间；篡改、跨任务、过期、未知文件等失败关闭。
+- 最终链接来自本轮 `rescue_poll` 的后端；旧插件从 `result_json` 根级 `receipt_url` 读取，新合同也可读取同值的 HTTP 顶层字段，禁止拼接或接受上游伪造字段。下载原始 result/patch/evidence/report，字节与原始 ZIP 一致，记录 SHA、失效时间；篡改、跨任务、过期、未知文件等失败关闭。
 - 同一 Bot 5773337 / workflow 648761 实际发布并实测公开入口。发布记录不能由 GitHub CI 或草稿保存代替。
 - 正式材料离线保留本轮公开证据快照与原始文件，避免评审期间仅依赖在线短期 artifact。包含个人信息的 ZIP 上传仍须单独确认。
 
