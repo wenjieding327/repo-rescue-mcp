@@ -16,23 +16,80 @@ test("HTTP delivery mints only terminal verify receipts and preserves the comple
   let calls = 0;
   const receipts = { mint: (actual) => { calls++; assert.deepEqual(actual, result); return "https://receipts.example/r/signed"; } };
   const envelope = httpToolEnvelope(message, "get_repair_job", receipts);
-  assert.equal(envelope.result_json, JSON.stringify(message.result));
   assert.equal(envelope.receipt_url, "https://receipts.example/r/signed");
+  const compatibleResult = JSON.parse(envelope.result_json);
+  assert.equal(compatibleResult.receipt_url, envelope.receipt_url);
+  const { receipt_url, ...preservedResult } = compatibleResult;
+  assert.equal(receipt_url, "https://receipts.example/r/signed");
+  assert.deepEqual(preservedResult, message.result);
+  assert.equal(preservedResult.content[0].text, message.result.content[0].text);
+  // Simulate the existing XFYun schema projecting away the undeclared outer
+  // receipt_url field: the declared result_json still carries the exact link.
+  const oldSchemaProjection = { is_error: envelope.is_error, result_json: envelope.result_json };
+  assert.equal(JSON.parse(oldSchemaProjection.result_json).receipt_url, "https://receipts.example/r/signed");
   assert.equal(envelope.is_error, false);
   for (const operation of ["rescue_python_snippet", "start_verify_github_patch", "start_prepare_github_repair"]) {
-    assert.equal(httpToolEnvelope(message, operation, receipts).receipt_url, "");
+    const rejected = httpToolEnvelope(message, operation, receipts);
+    assert.equal(rejected.receipt_url, "");
+    assert.equal(JSON.parse(rejected.result_json).receipt_url, "");
   }
   for (const job of [
     { ...value.job, terminal: false }, { ...value.job, status: "failed" },
     { ...value.job, operation: "prepare_github_repair" },
-  ]) assert.equal(httpToolEnvelope(makeMessage({ ...value, job }), "get_repair_job", receipts).receipt_url, "");
-  assert.equal(httpToolEnvelope(makeMessage({ ...value, ok: false }), "get_repair_job", receipts).receipt_url, "");
-  assert.equal(httpToolEnvelope({ ...message, error: { code: -1, message: "failed" } }, "get_repair_job", receipts).receipt_url, "");
-  assert.equal(httpToolEnvelope({ result: { content: [{ type: "text", text: "invalid" }] } }, "get_repair_job", receipts).receipt_url, "");
+  ]) {
+    const rejected = httpToolEnvelope(makeMessage({ ...value, job }), "get_repair_job", receipts);
+    assert.equal(rejected.receipt_url, "");
+    assert.equal(JSON.parse(rejected.result_json).receipt_url, "");
+  }
+  for (const rejected of [
+    httpToolEnvelope(makeMessage({ ...value, ok: false }), "get_repair_job", receipts),
+    httpToolEnvelope({ ...message, error: { code: -1, message: "failed" } }, "get_repair_job", receipts),
+    httpToolEnvelope({ result: { content: [{ type: "text", text: "invalid" }] } }, "get_repair_job", receipts),
+  ]) {
+    assert.equal(rejected.receipt_url, "");
+    assert.equal(JSON.parse(rejected.result_json).receipt_url, "");
+  }
   assert.equal(calls, 1);
   const unavailable = httpToolEnvelope(message, "get_repair_job", { mint() { throw new Error("unavailable"); } });
   assert.equal(unavailable.receipt_url, "");
-  assert.equal(unavailable.result_json, envelope.result_json);
+  assert.equal(JSON.parse(unavailable.result_json).receipt_url, "");
+  const { receipt_url: unavailableReceipt, ...unavailableResult } = JSON.parse(unavailable.result_json);
+  assert.equal(unavailableReceipt, "");
+  assert.deepEqual(unavailableResult, message.result);
+});
+
+test("HTTP delivery overwrites an upstream receipt field instead of trusting it", () => {
+  const value = { ok: true, job: { terminal: false, status: "queued", operation: "verify_github_patch" } };
+  const message = { result: {
+    receipt_url: "https://attacker.invalid/r/spoof",
+    content: [{ type: "text", text: JSON.stringify(value) }],
+    isError: false,
+  } };
+  let called = false;
+  const envelope = httpToolEnvelope(message, "get_repair_job", { mint() { called = true; return "https://attacker.invalid"; } });
+  assert.equal(called, false);
+  assert.equal(envelope.receipt_url, "");
+  assert.equal(JSON.parse(envelope.result_json).receipt_url, "");
+  assert.equal(JSON.parse(envelope.result_json).content[0].text, message.result.content[0].text);
+
+  const verified = { ok: true, repair: { verified_repair: true } };
+  const terminalMessage = { result: {
+    receipt_url: "https://attacker.invalid/r/spoof",
+    content: [{ type: "text", text: JSON.stringify({
+      ok: true,
+      job: { terminal: true, status: "succeeded", operation: "verify_github_patch", result: verified },
+    }) }],
+    isError: false,
+  } };
+  const safeEnvelope = httpToolEnvelope(terminalMessage, "get_repair_job", {
+    mint(actual) {
+      assert.deepEqual(actual, verified);
+      return "https://receipts.example/r/safe";
+    },
+  });
+  assert.equal(safeEnvelope.receipt_url, "https://receipts.example/r/safe");
+  assert.equal(JSON.parse(safeEnvelope.result_json).receipt_url, safeEnvelope.receipt_url);
+  assert.equal(JSON.parse(safeEnvelope.result_json).content[0].text, terminalMessage.result.content[0].text);
 });
 
 async function postTool(baseUrl, name, args, headers = {}) {
@@ -395,6 +452,8 @@ test("HTTP contracts alone use JSON strings for the two nested fields, with no d
     assert.equal(post.operationId, title);
     assert.deepEqual(post.responses["200"].content["application/json"].schema.required, ["is_error", "result_json", "receipt_url"]);
     assert.equal(post.responses["200"].content["application/json"].schema.properties.receipt_url.type, "string");
+    assert.match(post.responses["200"].content["application/json"].schema.properties.result_json.description,
+      /receipt_url mirror/);
   }
 });
 
