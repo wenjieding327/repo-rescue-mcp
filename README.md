@@ -80,7 +80,7 @@ For compatibility the default Node launcher keeps the legacy four-tool surface, 
 
 ### XFYun Agent repair through an authenticated HTTP gateway
 
-The current integration candidate uses four XFYun personal HTTP plugins, not the failed XFYun-hosted MCP runner. A single-replica Node gateway on Railway hosts the reviewed `platform` stdio worker; the long, untrusted repository run executes on an Ubuntu GitHub runner. Platform **tool-level** tests passed on 2026-09-09; autonomous Agent acceptance and publication are still pending. See [deployment evidence](docs/external-mcp-deployment.md) and the [current integration checklist](docs/xfyun-http-agent-acceptance.md).
+The current integration candidate uses four XFYun personal HTTP plugins. A single-replica Node gateway on Railway hosts the reviewed `platform` stdio worker; the long, untrusted repository run executes on an Ubuntu GitHub runner. Two real autonomous repository repairs passed backend artifact audits on 2026-09-10, but the model's final transcription altered hashes or patch text. The new delivery candidate returns a signed, read-only receipt with original artifact downloads. Its platform validation and publication are still pending. See [deployment evidence](docs/external-mcp-deployment.md), [original artifact delivery](docs/artifact-receipts.md), and the [current integration checklist](docs/xfyun-http-agent-acceptance.md).
 
 ```text
 XFYun model → authenticated HTTP plugin → Node platform worker → GitHub workflow_dispatch

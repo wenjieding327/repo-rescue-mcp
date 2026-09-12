@@ -182,7 +182,7 @@ function findEndOfCentralDirectory(zip) {
   throw new ActionsBridgeError("artifact_invalid", "The GitHub artifact is not a supported ZIP archive.");
 }
 
-export function extractBridgeArtifact(zipBytes) {
+export function extractBridgeArtifact(zipBytes, { strictFiles = false } = {}) {
   const zip = Buffer.from(zipBytes);
   if (zip.length > ACTIONS_BRIDGE_LIMITS.maxArtifactZipBytes) {
     throw new ActionsBridgeError("artifact_too_large", "The GitHub artifact ZIP exceeds the download limit.");
@@ -247,7 +247,10 @@ export function extractBridgeArtifact(zipBytes) {
       throw new ActionsBridgeError("artifact_invalid", "The GitHub artifact file data is truncated.");
     }
     const basename = name.split("/").at(-1);
-    if (!RESULT_FILES.has(basename)) continue;
+    if (!RESULT_FILES.has(basename)) {
+      if (strictFiles) throw new ActionsBridgeError("artifact_invalid", "The receipt archive contains an unexpected file.");
+      continue;
+    }
     if (files.has(basename)) throw new ActionsBridgeError("artifact_invalid", `The GitHub artifact contains duplicate ${basename} files.`);
     const compressed = zip.subarray(dataOffset, dataOffset + compressedSize);
     let content;
@@ -714,11 +717,47 @@ export class GitHubActionsBridge {
     job.headSha = run.head_sha;
   }
 
-  async _collectResult(job, run) {
+  // A receipt can be reloaded after a process restart without retaining a job
+  // capability. It is strictly read-only and restricted to the reviewed public
+  // bridge; the caller must authenticate its receipt before invoking this.
+  async loadVerifiedArtifact({ runId, artifactId } = {}) {
+    if (!Number.isSafeInteger(runId) || runId <= 0 || !Number.isSafeInteger(artifactId) || artifactId <= 0) {
+      throw new ActionsBridgeError("invalid_request", "Receipt artifact identifiers are invalid.");
+    }
+    if (
+      this.repository !== DEFAULT_REPOSITORY
+      || this.workflow !== DEFAULT_WORKFLOW
+      || this.ref !== DEFAULT_REF
+      || !sameSet(this.allowedRepositories, new Set(REVIEWED_PLATFORM_REPOSITORIES))
+    ) {
+      throw new ActionsBridgeError("configuration_required", "Receipts require the fixed reviewed public bridge configuration.");
+    }
+    await this._workflow();
+    const { value: run } = await this._request(`/repos/${this.repository}/actions/runs/${runId}`);
+    const title = /^RepoRescue ([A-Za-z0-9_-]{43}) verify$/.exec(String(run?.display_title || ""));
+    const createdAt = Date.parse(run?.created_at);
+    if (!title || !Number.isFinite(createdAt) || createdAt > this.now() + 60_000 || run?.status !== "completed" || run?.conclusion !== "success") {
+      throw new ActionsBridgeError("artifact_invalid", "The receipt does not identify a completed successful verification run.");
+    }
+    const job = { runId, requestId: title[1], mode: "verify", headSha: null, dispatchedAt: createdAt };
+    this._validateRun(job, run);
+    const bundle = await this._collectResult(job, run, { artifactId, forReceipt: true });
+    if (!bundle) throw new ActionsBridgeError("artifact_unavailable", "The receipt artifact is expired or unavailable.");
+    // The allow-list is not a promise that a repository will remain public.
+    const slug = bundle.result.result.repair.repository.slug;
+    const { value: repository } = await this._request(`/repos/${slug}`);
+    if (repository?.private !== false || String(repository?.full_name || "").toLowerCase() !== slug) {
+      throw new ActionsBridgeError("artifact_unavailable", "Receipt downloads require the reviewed source repository to remain public.");
+    }
+    return bundle;
+  }
+
+  async _collectResult(job, run, { artifactId = null, forReceipt = false } = {}) {
     const expectedName = `repo-rescue-${job.requestId}`;
     const { value } = await this._request(`/repos/${this.repository}/actions/runs/${job.runId}/artifacts?per_page=100`);
     const matches = (Array.isArray(value?.artifacts) ? value.artifacts : []).filter((artifact) => (
       artifact?.name === expectedName
+      && (artifactId === null || artifact?.id === artifactId)
       && artifact?.expired === false
       && Number.isSafeInteger(artifact?.id)
       && artifact.id > 0
@@ -728,6 +767,10 @@ export class GitHubActionsBridge {
     if (matches.length === 0) return null;
     if (matches.length !== 1) throw new ActionsBridgeError("artifact_invalid", "The workflow run returned an ambiguous repair artifact.");
     const artifact = matches[0];
+    const expiry = Date.parse(artifact.expires_at);
+    if (forReceipt && (!Number.isFinite(expiry) || expiry <= this.now())) {
+      throw new ActionsBridgeError("artifact_unavailable", "The receipt artifact is expired or unavailable.");
+    }
     if (!Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 || artifact.size_in_bytes > ACTIONS_BRIDGE_LIMITS.maxArtifactZipBytes) {
       throw new ActionsBridgeError("artifact_too_large", "The workflow artifact declared an invalid or oversized archive.");
     }
@@ -737,7 +780,7 @@ export class GitHubActionsBridge {
     const zip = await this._downloadArtifact(artifact.id);
     const expectedDigest = artifact.digest.slice("sha256:".length).toLowerCase();
     if (sha256(zip) !== expectedDigest) throw new ActionsBridgeError("artifact_invalid", "The workflow artifact digest did not match its archive.");
-    const files = extractBridgeArtifact(zip);
+    const files = extractBridgeArtifact(zip, { strictFiles: forReceipt });
     if (files.get("result.json").length > ACTIONS_BRIDGE_LIMITS.maxJsonResponseBytes) {
       throw new ActionsBridgeError("provider_response_too_large", "result.json exceeds the platform response limit.");
     }
@@ -745,7 +788,7 @@ export class GitHubActionsBridge {
     if (
       result?.request_id !== job.requestId
       || result?.mode !== job.mode
-      || result?.payload_sha256 !== job.payloadSha256
+      || (forReceipt ? !/^[0-9a-f]{64}$/i.test(String(result?.payload_sha256 || "")) : result?.payload_sha256 !== job.payloadSha256)
       || String(result?.github_run_id) !== String(job.runId)
       || result?.github_sha !== job.headSha
       || typeof result?.result !== "object"
@@ -796,6 +839,68 @@ export class GitHubActionsBridge {
         report: reportText,
       };
     }
+    if (forReceipt) {
+      const repair = result.result.repair;
+      const baseline = repair?.baseline;
+      const final = repair?.final_verification;
+      const evidence = artifactContents === null ? null : JSON.parse(artifactContents.evidence);
+      const { artifacts: ignoredArtifacts, ...repairEvidence } = repair || {};
+      // The core evidence advertises get_repair_artifact; the Actions bridge
+      // replaces only this transport descriptor with its GitHub artifact paths.
+      const { artifacts: evidenceArtifacts, ...recordedEvidence } = evidence || {};
+      if (
+        result.result.ok !== true
+        || repair?.verified_repair !== true
+        || repair?.status !== "verified_repair"
+        || !/^[A-Za-z0-9_-]{1,100}$/.test(String(repair?.run_id || ""))
+        || !this.allowedRepositories.has(repair?.repository?.slug)
+        || repair?.repository?.url !== `https://github.com/${repair?.repository?.slug}`
+        || !/^[0-9a-f]{40}$/i.test(String(repair?.repository?.commit || ""))
+        || repair?.verifier_backend !== "docker"
+        || baseline?.backend !== "docker"
+        || final?.backend !== "docker"
+        || baseline?.verified !== false
+        || final?.verified !== true
+        || final?.repair_evidence_eligible !== true
+        || typeof baseline?.command !== "string"
+        || !baseline.command.trim()
+        || baseline.command !== final?.command
+        || baseline?.execution?.timed_out !== false
+        || !Number.isSafeInteger(baseline?.execution?.exit_code)
+        || baseline.execution.exit_code === 0
+        || final?.execution?.timed_out !== false
+        || final?.execution?.exit_code !== 0
+        || !/^[0-9a-f]{64}$/i.test(String(baseline?.preparation_baseline_sha256 || ""))
+        || (evidenceArtifacts !== undefined && evidenceArtifacts?.run_id !== repair.run_id)
+        || JSON.stringify(canonicalValue(recordedEvidence)) !== JSON.stringify(canonicalValue(repairEvidence))
+      ) {
+        throw new ActionsBridgeError("artifact_invalid", "The receipt bundle is not a bound verified public Docker repair.");
+      }
+      const attestation = [repair.run_id, repair.repository.commit, baseline.command, baseline.execution.exit_code, final.execution.exit_code, repair.patch_sha256].join("|");
+      if (repair.attestation_sha256 !== sha256(Buffer.from(attestation, "utf8"))) {
+        throw new ActionsBridgeError("artifact_invalid", "The receipt verification attestation is inconsistent.");
+      }
+      if (baseline.verification_scope === "pytest_suite" || final.verification_scope === "pytest_suite") {
+        const before = baseline.execution.pytest_attestation;
+        const after = final.execution.pytest_attestation;
+        const validCounts = (value) => value?.completed === true
+          && ["collected", "passed", "failed", "skipped", "errors"].every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0);
+        if (!validCounts(before) || !validCounts(after) || before.runner_exit_code !== baseline.execution.exit_code
+          || after.runner_exit_code !== 0 || before.collected < 1 || after.collected < before.collected
+          || after.passed < 1 || after.failed !== 0 || after.errors !== 0
+          || after.passed + after.skipped !== after.collected || after.skipped > before.skipped) {
+          throw new ActionsBridgeError("artifact_invalid", "The receipt pytest evidence is incomplete or reduced in scope.");
+        }
+      }
+      // Never make an authenticated runtime credential downloadable, even if a
+      // provider unexpectedly includes it in a trusted artifact.
+      for (const content of files.values()) {
+        const text = decodeUtf8(content, "Receipt artifact");
+        if (text.includes(this.token) || new RegExp(SECRET_PATTERN.source, "i").test(text)) {
+          throw new ActionsBridgeError("artifact_invalid", "The receipt artifact failed its sensitive-content boundary.");
+        }
+      }
+    }
     const publicResult = {
       ...result.result,
       github_actions: {
@@ -805,7 +910,8 @@ export class GitHubActionsBridge {
         artifact_id: artifact.id,
         artifact_name: artifact.name,
         artifact_digest: artifact.digest.toLowerCase(),
-        html_url: typeof run.html_url === "string" ? run.html_url : null,
+        artifact_expires_at: Number.isFinite(expiry) ? new Date(expiry).toISOString() : null,
+        html_url: `https://github.com/${this.repository}/actions/runs/${job.runId}`,
         files: Object.fromEntries([...files.entries()].map(([name, content]) => [name, { bytes: content.length, sha256: sha256(content) }])),
         ...(artifactContents === null ? {} : { artifact_contents: artifactContents }),
       },
@@ -813,6 +919,7 @@ export class GitHubActionsBridge {
     if (byteLengthJson(publicResult) > ACTIONS_BRIDGE_LIMITS.maxJsonResponseBytes) {
       throw new ActionsBridgeError("provider_response_too_large", "The repair result exceeds the platform response limit.");
     }
+    if (forReceipt) return { files, zip, result, expiresAt: new Date(expiry).toISOString(), metadata: publicResult.github_actions };
     return publicResult;
   }
 
