@@ -1,6 +1,6 @@
 # Original artifact delivery
 
-The HTTP gateway separates the model's short explanation from the actual repair files. A verified terminal `get_repair_job` response can include a top-level `receipt_url`. The existing `result_json` remains the complete, unmodified MCP result. Other operations, incomplete jobs, errors and unverified repairs return an empty receipt URL.
+The HTTP gateway separates the model's short explanation from the actual repair files. A verified terminal `get_repair_job` response can include a top-level `receipt_url`. For compatibility with existing XFYun plugins that expose only `is_error` and `result_json`, the gateway also mirrors the same value as the root `receipt_url` field inside the JSON string. Every existing MCP result field and `content` value remains unchanged; `receipt_url` is a reserved additive gateway field. Other operations, incomplete jobs, errors and unverified repairs return an empty receipt URL in both locations.
 
 The Agent relays the exact URL and does not retype patches or long hashes. The receipt serves the original GitHub ZIP and its four files: `result.json`, `repair.patch`, `evidence.json`, and `report.md`. File bodies are original Buffers, including byte-order marks, indentation and line endings. The HTML page calculates SHA-256 from those bytes and escapes all untrusted text.
 
