@@ -17,6 +17,12 @@ The product serves beginners through one low-friction entry point while keeping 
 
 Direct file/notebook upload is a planned mode, not a current backend capability.
 
+On a deployed service, users do not install or start Docker and do not confirm
+an isolation mode in chat. They submit the code or an allowed repository URL;
+the backend worker owns isolation and execution. The Docker setup commands below
+are for administrators and local developers, not the hosted user flow. If the
+worker is unavailable, execution fails closed instead of running code on the host.
+
 ## Why it is different
 
 - **Generated repair, not a checklist:** the agent produces the candidate code.
@@ -153,6 +159,25 @@ The repair command uses the [OpenAI Responses API](https://developers.openai.com
 To expose the same workflow as MCP, run `.venv\Scripts\repo-rescue-mcp`. The Streamable HTTP endpoint defaults to `http://localhost:8000/mcp`; set `REPO_RESCUE_TRANSPORT=stdio` for a command-based host or `REPO_RESCUE_TRANSPORT=sse` for a legacy SSE client. Direct SSE uses the verified root `/sse` and `/messages/` routes. If a public URL needs a path prefix, add it in a reverse proxy rather than setting a FastMCP runtime mount path.
 
 The root `Dockerfile` packages the MCP API and trusted interview Demo; it does not embed a Docker daemon. Run full repository repair from a host/worker that can reach the separately built `repo-rescue-python:3.11` verifier image. Do not expose a privileged Docker socket to anonymous callers.
+
+### Automatic test discovery
+
+The trusted pytest worker extends default discovery to `test.py`, `tests.py`
+(including `src/tests.py`), and `*_tests.py`, alongside pytest's default names.
+It does not supply a manually selected file path or replace `testpaths`.
+An explicit `python_files` setting or `-o python_files=...` override remains
+authoritative, including an empty setting or an explicit copy of the defaults.
+A valid `tox.ini` is a pytest signal only if it contains a `[pytest]` section;
+tox commands are never executed automatically. Damaged or unreadable tox
+configurations retain pytest verification instead of a compile-only fallback.
+
+Results record `pytest_discovery_policy=project-config-or-extended-defaults-v1`.
+The same policy is used before and after patching. A zero-test run still fails
+verification, and the additional test filenames are protected against repair
+edits. This supports conventional Python layouts, not arbitrary test frameworks
+or arbitrary unreviewed repositories. See pytest's official documentation on
+[configuration](https://docs.pytest.org/en/stable/reference/customize.html) and
+[test discovery](https://docs.pytest.org/en/stable/example/pythoncollection.html).
 
 ### API-key-free host-agent repair
 

@@ -138,7 +138,7 @@ def _looks_like_test_file(relative: str) -> bool:
     name = path.name.casefold()
     return bool(
         name in {"conftest.py", *_DEDICATED_PYTEST_CONFIG_NAMES, "test.py", "tests.py", "tox.ini"}
-        or (path.suffix.casefold() == ".py" and (name.startswith("test_") or name.endswith("_test.py")))
+        or (path.suffix.casefold() == ".py" and (name.startswith("test_") or name.endswith(("_test.py", "_tests.py"))))
         or any(_is_named_test_directory(part) for part in path.parts[:-1])
     )
 
@@ -170,7 +170,7 @@ def _is_test_control_path(relative: str, snapshot_files: tuple[str, ...]) -> boo
     return bool(
         any(_is_named_test_directory(part) for part in path.parts[:-1])
         or name.startswith("test_")
-        or name.endswith("_test.py")
+        or name.endswith(("_test.py", "_tests.py"))
         or name in {"conftest.py", *_DEDICATED_PYTEST_CONFIG_NAMES, "test.py", "tests.py", "tox.ini"}
         or any(parts[: len(directory)] == directory for directory in protected_directories)
     )

@@ -352,6 +352,110 @@ def test_detects_root_and_singular_test_layouts(tmp_path: Path) -> None:
     assert result["suggested_verification_commands"][0] == "python -m pytest -q"
 
 
+@pytest.mark.parametrize("directory", ["", "Python/src"])
+@pytest.mark.parametrize("name", ["test.py", "tests.py", "compatibility_tests.py"])
+def test_detects_generic_test_module_names_and_static_methods(
+    tmp_path: Path,
+    directory: str,
+    name: str,
+) -> None:
+    module = tmp_path / directory / name
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_text(
+        "class CompatibilityChecks:\n"
+        "    @staticmethod\n"
+        "    def test_works():\n"
+        "        assert True\n",
+        encoding="utf-8",
+    )
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["test_file_count"] == 1
+    assert result["static_test_module_count"] == 1
+    assert result["suggested_verification_commands"] == ["python -m pytest -q"]
+
+
+@pytest.mark.parametrize("directory", ["", "backend"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "[tox]\nenvlist = lint\n[testenv:lint]\ncommands = ruff check .\n",
+        "[testenv]\ncommands = pytest\n",
+        "# [pytest]\n[tox]\nenvlist = lint\n",
+        "[testenv:pytest]\ncommands = pytest\n",
+    ],
+)
+def test_tox_without_pytest_section_does_not_select_pytest(
+    tmp_path: Path,
+    directory: str,
+    content: str,
+) -> None:
+    config = tmp_path / directory / "tox.ini"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(content, encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["pytest_configuration_files"] == []
+    assert result["suggested_verification_commands"] == ["python -m compileall -q ."]
+
+
+@pytest.mark.parametrize("directory", ["", "backend"])
+@pytest.mark.parametrize("content", ["[pytest]\n", "[tox]\nenvlist = lint\n[pytest]\naddopts = -q\n"])
+def test_tox_pytest_section_selects_pytest(
+    tmp_path: Path,
+    directory: str,
+    content: str,
+) -> None:
+    config = tmp_path / directory / "tox.ini"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(content, encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["pytest_configuration_files"] == [config.relative_to(tmp_path).as_posix()]
+    assert result["suggested_verification_commands"] == ["python -m pytest -q"]
+
+
+@pytest.mark.parametrize("directory", ["", "backend"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[pytest\naddopts = -q\n",
+        "[tox]\nenvlist = lint\nenvlist = test\n",
+        "[pytest]\n[pytest]\n",
+        "#" * 131_073,
+    ],
+    ids=["invalid-header", "duplicate-key", "duplicate-section", "oversized"],
+)
+def test_malformed_or_oversized_tox_does_not_fall_back_to_smoke(
+    tmp_path: Path,
+    directory: str,
+    content: str,
+) -> None:
+    config = tmp_path / directory / "tox.ini"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(content, encoding="utf-8")
+    (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    total, files = inventory(tmp_path)
+    snapshot = RepositorySnapshot(tmp_path, "student/demo", "https://github.com/student/demo", "abc", total, files)
+
+    result = analyze_snapshot(snapshot)
+
+    assert result["pytest_configuration_files"] == [config.relative_to(tmp_path).as_posix()]
+    assert result["suggested_verification_commands"] == ["python -m pytest -q"]
+
+
 def test_pyproject_pytest_configuration_selects_pytest(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = '-q'\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")

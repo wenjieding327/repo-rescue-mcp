@@ -157,6 +157,7 @@ def _verification_plan(snapshot: RepositorySnapshot, verification: str) -> tuple
 
 
 _PYTEST_ATTESTATION_PREFIX = "__REPO_RESCUE_PYTEST_ATTESTATION__"
+_PYTEST_DISCOVERY_POLICY = "project-config-or-extended-defaults-v1"
 
 
 def _trusted_pytest_command(
@@ -174,6 +175,7 @@ def _trusted_pytest_command(
             "import json",
             "import os",
             "import sys",
+            "import warnings",
             "import pytest",
             "_rr_xml = sys.argv[1]",
             "_rr_paths = json.loads(sys.argv[2])",
@@ -182,12 +184,33 @@ def _trusted_pytest_command(
             "_rr_hard_exit = os._exit",
             "sys.argv[:] = [sys.argv[0]]",
             "sys.path[:0] = _rr_paths",
+            # Extend defaults inside the worker, not by supplying positional
+            # paths (which would override project testpaths). Explicit project
+            # patterns and -o overrides remain authoritative, including empty
+            # patterns. The same fixed policy runs before and after a repair.
+            "class _RepoRescueDiscovery:",
+            "    @pytest.hookimpl(trylast=True)",
+            "    def pytest_configure(self, config):",
+            "        overrides = config.getoption('override_ini', default=()) or ()",
+            "        if any(value.partition('=')[0].strip() == 'python_files' for value in overrides):",
+            "            return",
+            # pytest 9.1 deprecates inicfg, but getini alone cannot distinguish
+            # an explicit default-valued setting from an absent setting. This
+            # compatibility read is bounded to pytest <10 (our declared range).
+            "        with warnings.catch_warnings():",
+            "            warnings.filterwarnings('ignore', message=r'^config\\.inicfg is deprecated', category=pytest.PytestDeprecationWarning)",
+            "            configured = 'python_files' in config.inicfg",
+            "        if configured:",
+            "            return",
+            "        for pattern in ('test.py', 'tests.py', '*_tests.py'):",
+            "            if pattern not in config.getini('python_files'):",
+            "                config.addinivalue_line('python_files', pattern)",
             # Preserve the cacheprovider API for repositories that legitimately
             # use the cache fixture, but keep its writes off the read-only checkout.
             # The fixed path lives beside the trusted JUnit file in the isolated
             # execution temp directory and is removed by the controller.
             "_rr_cache = os.path.join(os.path.dirname(_rr_xml), 'repo-rescue-pytest-cache')",
-            "_rr_exit = int(_rr_pytest_main([*_rr_args, '-o', 'cache_dir=' + _rr_cache, '--junitxml=' + _rr_xml]))",
+            "_rr_exit = int(_rr_pytest_main([*_rr_args, '-o', 'cache_dir=' + _rr_cache, '--junitxml=' + _rr_xml], plugins=[_RepoRescueDiscovery()]))",
             "sys.stdout.flush()",
             "sys.stderr.flush()",
             "_rr_hard_exit(_rr_exit)",
@@ -372,6 +395,7 @@ def _reproduce_direct(
                 "repository": analysis["repository"],
                 "backend": "direct_allowlist",
                 "verification_command": reported_verification,
+                "pytest_discovery_policy": _PYTEST_DISCOVERY_POLICY if verification == "python -m pytest -q" else None,
                 "install": install,
                 "execution": None,
                 "verified": False,
@@ -443,6 +467,7 @@ def _reproduce_direct(
             "repository": analysis["repository"],
             "backend": "direct_allowlist",
             "verification_command": reported_verification,
+            "pytest_discovery_policy": _PYTEST_DISCOVERY_POLICY if verification == "python -m pytest -q" else None,
             "install": install,
             "execution": execution,
             "verified": verified,
@@ -522,6 +547,7 @@ def reproduce(snapshot: RepositorySnapshot, analysis: dict[str, Any]) -> dict[st
                 "repository": analysis["repository"],
                 "backend": "docker",
                 "verification_command": reported_verification,
+                "pytest_discovery_policy": _PYTEST_DISCOVERY_POLICY if verification == "python -m pytest -q" else None,
                 "install": install,
                 "execution": None,
                 "verified": False,
@@ -564,6 +590,7 @@ def reproduce(snapshot: RepositorySnapshot, analysis: dict[str, Any]) -> dict[st
             "repository": analysis["repository"],
             "backend": "docker",
             "verification_command": reported_verification,
+            "pytest_discovery_policy": _PYTEST_DISCOVERY_POLICY if verification == "python -m pytest -q" else None,
             "install": install,
             "execution": execution,
             "verified": verified,

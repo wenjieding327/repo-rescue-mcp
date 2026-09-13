@@ -94,7 +94,12 @@ def _is_test_file(relative: str) -> bool:
         return False
     name = path.name.lower()
     named_test_tree = any(_is_test_tree_part(part) for part in path.parts[:-1])
-    return bool(named_test_tree or name.startswith("test_") or name.endswith("_test.py"))
+    return bool(
+        named_test_tree
+        or name in {"test.py", "tests.py"}
+        or name.startswith("test_")
+        or name.endswith(("_test.py", "_tests.py"))
+    )
 
 
 def _read_text(root: Path, relative: str, limit: int = 131_072) -> str | None:
@@ -193,6 +198,20 @@ def _pytest_testpaths_from_ini(text: str, name: str) -> tuple[bool, list[str]]:
         value = parser.get("pytest", "testpaths", fallback=None)
         return True, _normalise_pytest_testpaths(value)
     return False, []
+
+
+def _is_pytest_configuration_file(root: Path, relative: str) -> bool:
+    name = Path(relative).name.lower()
+    if name not in PYTEST_CONFIG_NAMES:
+        return False
+    if name != "tox.ini":
+        return True
+    text = _read_text(root, relative)
+    if text is None:
+        # An unreadable config must not turn an unverified test run into smoke success.
+        return True
+    configured, _ = _pytest_testpaths_from_ini(text, name)
+    return configured
 
 
 def _root_pytest_testpaths(root: Path, files: set[str]) -> list[str]:
@@ -402,7 +421,7 @@ def analyze_snapshot(snapshot: RepositorySnapshot) -> dict[str, Any]:
     ]
     suggested_commands: list[str] = []
     pytest_configuration_files = sorted(
-        name for name in file_set if Path(name).name.lower() in PYTEST_CONFIG_NAMES
+        name for name in file_set if _is_pytest_configuration_file(root, name)
     )
     pytest_configured = bool(
         pytest_configuration_files
