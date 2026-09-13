@@ -127,12 +127,13 @@ def test_rejects_helpers_anywhere_in_named_test_tree(tmp_path: Path, directory: 
     assert helper.read_text(encoding="utf-8") == "EXPECTED = 1\n"
 
 
-def test_protects_entire_directory_discovered_from_a_test_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("test_name", ["test_feature.py", "feature_tests.py"])
+def test_protects_entire_directory_discovered_from_a_test_file(tmp_path: Path, test_name: str) -> None:
     qa = tmp_path / "qa"
     qa.mkdir()
     helper = qa / "expected_values.py"
     helper.write_text("EXPECTED = 1\n", encoding="utf-8")
-    (qa / "test_feature.py").write_text("def test_feature():\n    assert True\n", encoding="utf-8")
+    (qa / test_name).write_text("def test_feature():\n    assert True\n", encoding="utf-8")
     proposal = RepairProposal(
         "weaken helper in a custom test directory",
         (FileReplacement("qa/expected_values.py", "EXPECTED = 2\n"),),
@@ -151,6 +152,22 @@ def test_rejects_test_modification(tmp_path: Path) -> None:
 
     with pytest.raises(SecurityError, match="may not modify tests"):
         apply_repair_proposal(_snapshot(tmp_path), proposal)
+
+
+@pytest.mark.parametrize("relative", ["test.py", "tests.py", "feature_tests.py", "src/tests.py", "src/feature_tests.py"])
+def test_rejects_extended_test_filename_modification(tmp_path: Path, relative: str) -> None:
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = "def test_feature():\n    assert False\n"
+    target.write_text(original, encoding="utf-8")
+    proposal = RepairProposal(
+        "weaken a test discovered by the default filename extension",
+        (FileReplacement(relative, "def test_feature():\n    assert True\n"),),
+    )
+
+    with pytest.raises(SecurityError, match="may not modify tests"):
+        apply_repair_proposal(_snapshot(tmp_path), proposal)
+    assert target.read_text(encoding="utf-8") == original
 
 
 def test_rejects_conftest_and_pyproject_test_configuration_changes(tmp_path: Path) -> None:

@@ -12,6 +12,50 @@ from repo_rescue.repository import RepositorySnapshot, inventory
 from repo_rescue.verifier import DockerRepositoryVerifier
 
 
+def _verify_extended_test_discovery(root: Path) -> None:
+    project = root / "discovery-project"
+    source = project / "src"
+    source.mkdir(parents=True)
+    (source / "tests.py").write_text(
+        "import unittest\n\n"
+        "class Checks(unittest.TestCase):\n"
+        "    @staticmethod\n"
+        "    def test_addition():\n"
+        "        assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
+    (project / "tox.ini").write_text(
+        "[tox]\nenvlist = py\n[testenv]\ncommands = python -m unittest discover -s src\n",
+        encoding="utf-8",
+    )
+    total, files = inventory(project)
+    commit = hashlib.sha256(
+        b"".join(relative.encode("utf-8") + b"\0" + (project / relative).read_bytes() for relative in files)
+    ).hexdigest()
+    snapshot = RepositorySnapshot(
+        path=project,
+        slug="fixture/docker-smoke",
+        source_url="builtin://docker-smoke-discovery",
+        commit=commit,
+        total_bytes=total,
+        files=files,
+    )
+    analysis = analyze_snapshot(snapshot)
+    if analysis["pytest_configuration_files"] or analysis["suggested_verification_commands"] != ["python -m pytest -q"]:
+        raise RuntimeError("Docker discovery smoke did not automatically select pytest from src/tests.py.")
+    result = DockerRepositoryVerifier().verify(snapshot, analysis)
+    if not result.get("verified") or result.get("backend") != "docker":
+        raise RuntimeError(f"Docker discovery smoke did not verify: {result.get('status')}")
+    if result.get("command") != "python -m pytest -q":
+        raise RuntimeError("Docker discovery smoke did not use the default pytest command.")
+    if result.get("pytest_discovery_policy") != "project-config-or-extended-defaults-v1":
+        raise RuntimeError("Docker discovery smoke did not report the expected discovery policy.")
+    attestation = (result.get("execution") or {}).get("pytest_attestation") or {}
+    if attestation.get("collected") != 1 or attestation.get("passed") != 1:
+        raise RuntimeError("Docker discovery smoke did not collect and pass exactly one test.")
+    print("DOCKER_DISCOVERY_STATUS=verified collected=1 passed=1")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="repo-rescue-docker-smoke-") as temporary:
         root = Path(temporary)
@@ -52,6 +96,7 @@ def main() -> None:
                 artifacts_root=root / "artifacts",
                 max_attempts=1,
             )
+            _verify_extended_test_discovery(root)
         finally:
             if previous_allowlist is None:
                 os.environ.pop("REPO_RESCUE_ALLOWED_REPOS", None)

@@ -31,6 +31,7 @@ class DockerRepositoryVerifier:
             "verified": bool(result.get("verified")),
             "backend": result.get("backend", "docker"),
             "command": result.get("verification_command"),
+            "pytest_discovery_policy": result.get("pytest_discovery_policy"),
             "install": result.get("install"),
             "execution": result.get("execution"),
             "verification_scope": result.get("verification_scope"),

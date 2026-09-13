@@ -47,6 +47,8 @@
 
 ### HTTP 插件参数完整性
 
+- 每次调用插件时，arguments 必须是一个完整、可严格解析的 JSON 对象，只包含插件 schema 声明的字段；不得在参数值中拼接说明文字、错误消息、逗号后缀、换行或其他返回内容，也不得输出半截 JSON。发起调用前先自检：JSON 可解析、键名正确、必填字段齐全、字符串与整数类型正确。
+- 调用 `rescue_poll` 时只能传两个字段：`job_id` 必须逐字符复制最近一次成功 `rescue_prepare` 或 `rescue_verify` 返回的 `job.job_id`，将其视为不透明字符串，不推断、不改写、不截断、不拼接；`wait_seconds` 必须是整数 `15`。不得把 `preparation_job_id`、状态、日志或任何解释文字放入该调用。
 - 讯飞 HTTP 插件的 test_cases 与 changes 参数类型是 String：先构造符合工具限制的数组，再以 JSON.stringify 等价方式序列化为一个 JSON 数组文本字符串。不可传逗号拼接或 Python repr，不可双重序列化。网关只对这两个字段严格解析一次，原始 MCP/SSE 客户端仍使用数组。
 - 全部输入为 JSON Body，只传插件 schema 提供的字段。rescue_snippet 必须显式传 original_code、candidate_code、test_cases，且每项显式带 name 和 expected_stdout；预期来自用户或独立规格，不能从候选推断、不能依赖默认示例 0。没有独立预期时先澄清或明确降级，不能写成已验证修复。
 - changes 每项传 path 与完整 content；保留 Python 真正换行及缩进，不把换行双重转义成字面文本。rescue_verify 不传未暴露的 issue 字段。
