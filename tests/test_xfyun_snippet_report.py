@@ -88,6 +88,22 @@ class SnippetReportTests(unittest.TestCase):
     def test_already_correct(self):
         self.assertEqual(report(ARGS, payload_for(ARGS, [(execution("1\n"), execution("1\n"))]))["status"], "already_correct")
 
+    def test_no_oracle_display_is_not_a_match_verdict(self):
+        args = {**ARGS, "test_cases": [{"name": "no-oracle"}]}
+        result = report(args, payload_for(args, [(execution("0\n"), execution("1\n"))]))
+        self.assertEqual(result["status"], "missing_oracle")
+        self.assertIn("完整输出匹配=未比对（缺少独立预期）", result["report"])
+        self.assertNotIn("完整输出匹配=true", result["report"])
+        self.assertNotIn("完整输出匹配=false", result["report"])
+
+    def test_oracle_display_keeps_true_and_false(self):
+        for stdout, expected, status in (("1\n", "true", "fix_verified"), ("0\n", "false", "candidate_failed")):
+            with self.subTest(match=expected):
+                result = report(ARGS, payload_for(ARGS, [(execution("0\n"), execution(stdout))]))
+                self.assertEqual(result["status"], status)
+                self.assertIn("完整输出匹配=" + expected, result["report"])
+                self.assertNotIn("未比对（缺少独立预期）", result["report"])
+
     def test_missing_false_non_boolean_or_contradictory_fields(self):
         for key in ("fix_verified", "candidate_passed", "before_failed", "source_changed", "oracle_backed", "runtime_repair_observed"):
             for value in (None, "true", 1, False):

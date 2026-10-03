@@ -9,6 +9,16 @@ const SNIPPET = { route: "snippet", original_code: "print(1 / 0)", candidate_cod
 const JOB = { route: "github", repo_url: "https://github.com/pallets/click", job_id: "A".repeat(43), request_started_at: STAMP };
 const raw = (request) => JSON.stringify({ request_json: JSON.stringify(request) });
 
+// Failure diagnostics deliberately exclude source, streams, messages and credentials.
+function snippetDiagnostic(payload) {
+  const errors = new Set(["WorkerTimeoutError", "WorkerProtocolError", "WorkerLaunchError", "ZeroDivisionError", "IndexError", "PermissionError"]);
+  return JSON.stringify({
+    status: ["fix_verified", "candidate_runs", "candidate_failed"].includes(payload.status) ? payload.status : "unknown",
+    worker_timeout_ms: Number.isSafeInteger(payload.worker_timeout_ms) ? payload.worker_timeout_ms : null,
+    error_type: (Array.isArray(payload.test_results) ? payload.test_results : []).flatMap((item) => ["before", "after"].map((phase) => errors.has(item?.[phase]?.error_type) ? item[phase].error_type : item?.[phase]?.error_type ? "other" : null)),
+  });
+}
+
 async function startServer(t, configured = {}) {
   const environment = { REPO_RESCUE_GITHUB_TOKEN: "", REPO_RESCUE_HTTP_ACCESS_TOKEN: ACCESS_TOKEN };
   for (const key of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE"]) {
@@ -62,7 +72,7 @@ test("real snippet execution reaches the existing protected worker and preserves
   const url = await startServer(t);
   const { payload, envelope } = await business(await post(url, raw(SNIPPET)));
   assert.equal(envelope.is_error, false);
-  assert.equal(payload.status, "fix_verified");
+  assert.equal(payload.status, "fix_verified", snippetDiagnostic(payload));
   assert.equal(payload.fix_verified, true);
   assert.equal(payload.execution_backend, "pyodide_disposable_child_process");
   assert.equal(payload.test_results[0].before.stdout, "");
@@ -162,6 +172,6 @@ test("four real pending snippets block both advice and another execution", { tim
   assert.equal((await post(url, raw(args))).status, 429);
   for (const response of await Promise.all(active)) {
     const { payload } = await business(response);
-    assert.equal(payload.fix_verified, true);
+    assert.equal(payload.fix_verified, true, snippetDiagnostic(payload));
   }
 });

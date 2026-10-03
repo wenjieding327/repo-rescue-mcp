@@ -124,7 +124,8 @@ def _finish(state, status):
                 lines.append(label + "：无可用执行记录。")
             else:
                 lines.append(label + "：ok=" + _quote(execution["ok"]) + "；stdout=" + _quote(execution["stdout"]) + "；stderr=" + _quote(execution["stderr"]) + "；输出完整=" + _quote(execution["complete"]) + "。")
-        lines.append("候选用例通过=" + _quote(case["candidate_passed"]) + "；完整输出匹配=" + _quote(case["output_matches"]) + "。")
+        comparison = "未比对（缺少独立预期）" if case["expected_stdout"] is None else _quote(case["output_matches"])
+        lines.append("候选用例通过=" + _quote(case["candidate_passed"]) + "；完整输出匹配=" + comparison + "。")
     if state.get("tool_error"):
         lines.append("工具错误原文：" + _quote(state["tool_error"]) + "。")
     if state["issues"]:

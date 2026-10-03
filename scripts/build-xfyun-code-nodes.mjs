@@ -20,6 +20,10 @@ export function selectPython(root = ROOT) {
   return existsSync(local) ? local : "python";
 }
 
+export function normalizeSourceNewlines(source) {
+  return source.replace(/\r\n/g, "\n");
+}
+
 const COMMON = `import json
 
 def _node_json(value):
@@ -107,7 +111,7 @@ function lexicalGate(source, name, implementation, parameters) {
 
 export async function buildXfyunCodeNodes({ outputDirectory = OUTPUT, python = selectPython() } = {}) {
   const sources = {};
-  for (const [name, filename] of Object.entries(SOURCES)) sources[name] = await readFile(join(ROOT, "scripts", filename), "utf8");
+  for (const [name, filename] of Object.entries(SOURCES)) sources[name] = normalizeSourceNewlines(await readFile(join(ROOT, "scripts", filename), "utf8"));
   const router = `${ENCODING}# Independent request router; key0 must be bound directly to the next node.\n${renameMain(sources.router, "_route_input", "router")}\n\n${COMMON}\ndef main(input):
     context = _route_input(input)
     return _node_output(_node_json(context), context["route"])
@@ -134,7 +138,7 @@ export async function buildXfyunCodeNodes({ outputDirectory = OUTPUT, python = s
         request = _node_request(input)
         route = request["route"]
         if route == "advice":
-            return _node_output("未执行、未验证：本轮仅为建议或格式澄清，没有实际工具执行证据。", "advice_not_executed")
+            return _node_output("未验证修复：本轮未取得可独立核验的代码执行与测试证据。", "advice_not_executed")
         _node_plugin(input2)
         if route == "snippet":
             result = _snippet_gate(input2, request["original_code"], request["candidate_code"], request["test_cases"])

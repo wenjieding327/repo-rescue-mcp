@@ -250,6 +250,17 @@ class RepositoryReportTests(unittest.TestCase):
             payload["job"]["result"]["repair"].update(verified_repair=False, status=status)
             self.assertNotVerified(render(payload), expected)
 
+    def test_report_boundary_is_conditional_without_changing_verdict(self):
+        failed = success()
+        failed["job"]["result"]["repair"].update(verified_repair=False, status="repair_failed")
+        for payload, expected in ((success(), "verified_repair"), (failed, "failed")):
+            with self.subTest(status=expected):
+                result = render(payload)
+                self.assertEqual(result["status"], expected)
+                self.assertIn("只有验收通过时，才证明本轮固定仓库提交", result["report"])
+                self.assertIn("失败不构成修复证明", result["report"])
+                self.assertNotIn("\n仅证明本轮固定仓库提交", result["report"])
+
     def test_logs_hide_capability_and_private_link_without_inventing_output(self):
         payload = success()
         repair = payload["job"]["result"]["repair"]
