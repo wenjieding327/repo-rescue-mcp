@@ -18,7 +18,13 @@ test.after(async () => {
   await rm(temporary, { recursive: true, force: true });
 });
 
-const HARNESS = `import ast,importlib.util,json,pathlib,sys
+const HARNESS = `import ast,copy,importlib.util,json,pathlib,sys
+def without_docstrings(tree):
+ tree=copy.deepcopy(tree)
+ for item in ast.walk(tree):
+  if isinstance(item,(ast.Module,ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)) and item.body and isinstance(item.body[0],ast.Expr) and isinstance(item.body[0].value,ast.Constant) and isinstance(item.body[0].value.value,str):
+   item.body=item.body[1:]
+ return tree
 modules=[]
 for index,path in enumerate(sys.argv[1:]):
  spec=importlib.util.spec_from_file_location('generated_node_'+str(index),path)
@@ -33,7 +39,25 @@ for scenario in json.loads(sys.stdin.buffer.read().decode('utf-8')):
   items=[]
   for path in sys.argv[1:]:
    tree=ast.parse(pathlib.Path(path).read_text(encoding='utf-8'))
-   items.append({'top_main':sum(isinstance(item,ast.FunctionDef) and item.name=='main' for item in tree.body),'unsafe_calls':[item.func.id for item in ast.walk(tree) if isinstance(item,ast.Call) and isinstance(item.func,ast.Name) and item.func.id in ('eval','exec')],'project_imports':[item.module for item in ast.walk(tree) if isinstance(item,ast.ImportFrom) and item.module and ('repo_rescue' in item.module or item.module.startswith('scripts'))]})
+   embedded=[]
+   for outer in tree.body:
+    if not isinstance(outer,ast.FunctionDef) or outer.name not in scenario.get('gate_sources',{}):
+     continue
+    original=scenario['gate_sources'][outer.name]
+    source=pathlib.Path(original['path']).read_text(encoding='utf-8')
+    # Compare in the same lexical embedding: whole-source indentation also
+    # indents multiline docstring values, an existing bundler characteristic.
+    expected_outer=ast.parse('def _expected_embedded():\\n'+'\\n'.join('    '+line for line in source.rstrip().splitlines())+'\\n').body[0]
+    source_tree=ast.Module(body=expected_outer.body,type_ignores=[])
+    embedded_tree=ast.Module(body=copy.deepcopy(outer.body[:-1]),type_ignores=[])
+    renamed=[item for item in embedded_tree.body if isinstance(item,ast.FunctionDef) and item.name==original['implementation']]
+    if len(renamed)==1:
+     renamed[0].name='main'
+    returned=outer.body[-1]
+    target=returned.value.func.id if isinstance(returned,ast.Return) and isinstance(returned.value,ast.Call) and isinstance(returned.value.func,ast.Name) else None
+    original_logic_equivalent=ast.dump(without_docstrings(ast.parse(source)))==ast.dump(without_docstrings(embedded_tree))
+    embedded.append({'gate':outer.name,'source_equivalent':len(renamed)==1 and ast.dump(source_tree)==ast.dump(embedded_tree),'original_logic_equivalent':len(renamed)==1 and original_logic_equivalent,'call_target':target})
+   items.append({'top_main':sum(isinstance(item,ast.FunctionDef) and item.name=='main' for item in tree.body),'all_main':sum(isinstance(item,(ast.FunctionDef,ast.AsyncFunctionDef)) and item.name=='main' for item in ast.walk(tree)),'embedded_gates':embedded,'unsafe_calls':[item.func.id for item in ast.walk(tree) if isinstance(item,ast.Call) and isinstance(item.func,ast.Name) and item.func.id in ('eval','exec')],'project_imports':[item.module for item in ast.walk(tree) if isinstance(item,ast.ImportFrom) and item.module and ('repo_rescue' in item.module or item.module.startswith('scripts'))]})
   results.append(items)
  elif mode=='binding':
   results.append(binder.main(scenario['context'],scenario['agent_output']))
@@ -86,17 +110,27 @@ function syntheticPlugin({ before = execution("0\n"), after = execution("1\n"), 
   return JSON.stringify({ content: [{ type: "text", text: JSON.stringify(payload) }], isError: false, receipt_url: "" });
 }
 
-test("generated nodes compile, use UTF-8, own one main, and never eval/exec or import the project", async () => {
+test("generated nodes compile, own exactly one main anywhere in the AST, and only rename embedded gate entries", async () => {
   assert.equal(built.files.length, 3);
   for (const file of built.files) {
     assert.ok((await readFile(file.path, "utf8")).startsWith("# -*- coding: utf-8 -*-\n"));
     assert.equal(file.sha256.length, 64);
   }
-  for (const module of pythonRun([{ mode: "inspect" }])[0]) {
+  const gate_sources = {
+    _snippet_gate: { path: join(ROOT, "scripts", "xfyun-snippet-report.py"), implementation: "_snippet_impl" },
+    _repository_gate: { path: join(ROOT, "scripts", "xfyun-repository-report.py"), implementation: "_repository_impl" },
+  };
+  const modules = pythonRun([{ mode: "inspect", gate_sources }])[0];
+  for (const module of modules) {
     assert.equal(module.top_main, 1);
+    assert.equal(module.all_main, 1);
     assert.deepEqual(module.unsafe_calls, []);
     assert.deepEqual(module.project_imports, []);
   }
+  assert.deepEqual(modules[2].embedded_gates, [
+    { gate: "_snippet_gate", source_equivalent: true, original_logic_equivalent: true, call_target: "_snippet_impl" },
+    { gate: "_repository_gate", source_equivalent: true, original_logic_equivalent: true, call_target: "_repository_impl" },
+  ]);
 });
 
 test("modern complete_program synthetic fixture goes through all three wrappers", () => {

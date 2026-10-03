@@ -96,13 +96,13 @@ function renameMain(source, replacement, label) {
   return source.replace(/^def main\(/m, `def ${replacement}(`).trimEnd();
 }
 
-function lexicalGate(source, name, parameters) {
+function lexicalGate(source, name, implementation, parameters) {
   if (/^from __future__ import /m.test(source) || /^if __name__\s*==/m.test(source)) {
     throw new Error(`${name}: unsupported top-level future import or executable CLI block`);
   }
-  if ([...source.matchAll(/^def main\(/gm)].length !== 1) throw new Error(`${name}: exactly one main is required`);
-  const indented = source.trimEnd().split(/\r?\n/).map((line) => `    ${line}`).join("\n");
-  return `def ${name}(${parameters}):\n${indented}\n    return main(${parameters})\n`;
+  const renamed = renameMain(source, implementation, name);
+  const indented = renamed.split(/\r?\n/).map((line) => `    ${line}`).join("\n");
+  return `def ${name}(${parameters}):\n${indented}\n    return ${implementation}(${parameters})\n`;
 }
 
 export async function buildXfyunCodeNodes({ outputDirectory = OUTPUT, python = selectPython() } = {}) {
@@ -129,7 +129,7 @@ export async function buildXfyunCodeNodes({ outputDirectory = OUTPUT, python = s
     except (TypeError, ValueError, UnicodeError, RecursionError, MemoryError):
         return _node_output(_node_json({"route": "advice"}), "未执行、未验证：输入字段或冻结候选绑定不可靠，已拒绝执行。")
 `;
-  const report = `${ENCODING}# The plugin result_json MUST be a direct independent tool-node reference.\n${COMMON}\n${lexicalGate(sources.snippet, "_snippet_gate", "result_json, original_code, candidate_code, test_cases")}\n${lexicalGate(sources.repository, "_repository_gate", "result_json, repo_url, job_id, request_started_at")}\ndef main(input, input2):
+  const report = `${ENCODING}# The plugin result_json MUST be a direct independent tool-node reference.\n${COMMON}\n${lexicalGate(sources.snippet, "_snippet_gate", "_snippet_impl", "result_json, original_code, candidate_code, test_cases")}\n${lexicalGate(sources.repository, "_repository_gate", "_repository_impl", "result_json, repo_url, job_id, request_started_at")}\ndef main(input, input2):
     try:
         request = _node_request(input)
         route = request["route"]
