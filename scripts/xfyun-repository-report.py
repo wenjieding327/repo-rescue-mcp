@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-BOUNDARY = "仅证明本轮固定仓库提交及同一 pytest 测试范围的失败到通过；不证明任意仓库、完整项目或论文复现。"
+BOUNDARY = "只有验收通过时，才证明本轮固定仓库提交及同一 pytest 测试范围的失败到通过；失败不构成修复证明；不证明任意仓库、完整项目或论文复现。"
 TRUST_BOUNDARY = "依据独立 rescue_poll 原始返回；调用方负责可信来源和本次调用绑定，本报告不验签、不生成收据。"
 LOG_BOUNDARY = "下列 stdout/stderr 是后端保存的脱敏日志；显示时隐藏 capability、凭据及日志链接，不推测未执行的输出。"
 RECEIPT_HOST = "reporescue-mcp-production.up.railway.app"

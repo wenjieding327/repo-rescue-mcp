@@ -5,6 +5,28 @@ import test from "node:test";
 import { runSequentialSnippetPair } from "../snippet-pair.mjs";
 import { createSnippetWorkerEnvironment } from "../snippet-worker-env.mjs";
 
+// Failure diagnostics deliberately exclude source, streams, messages and credentials.
+function snippetDiagnostic(payload) {
+  const errors = new Set(["WorkerTimeoutError", "WorkerProtocolError", "WorkerLaunchError", "ZeroDivisionError", "IndexError", "PermissionError"]);
+  return JSON.stringify({
+    status: ["fix_verified", "candidate_runs", "candidate_failed"].includes(payload.status) ? payload.status : "unknown",
+    worker_timeout_ms: Number.isSafeInteger(payload.worker_timeout_ms) ? payload.worker_timeout_ms : null,
+    error_type: (Array.isArray(payload.test_results) ? payload.test_results : []).flatMap((item) => ["before", "after"].map((phase) => errors.has(item?.[phase]?.error_type) ? item[phase].error_type : item?.[phase]?.error_type ? "other" : null)),
+  });
+}
+
+test("npm test serializes the real-worker integration files", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.match(manifest.scripts.test, /^node --test --test-concurrency=1 /);
+  for (const name of ["stdio-snippet", "http-sse", "xfyun-execute"]) assert.ok(manifest.scripts.test.includes(`tests/${name}.test.mjs`));
+});
+
+test("snippet failure diagnostics expose only fixed status, budget and error types", () => {
+  const diagnostic = snippetDiagnostic({ status: "PRIVATE-SENTINEL", worker_timeout_ms: 6000, original_code: "PRIVATE-SENTINEL", test_results: [{ before: { error_type: "WorkerTimeoutError", error_message: "PRIVATE-SENTINEL", stdout: "PRIVATE-SENTINEL" }, after: { error_type: "PRIVATE-SENTINEL" } }] });
+  assert.deepEqual(JSON.parse(diagnostic), { status: "unknown", worker_timeout_ms: 6000, error_type: ["WorkerTimeoutError", "other"] });
+  assert.equal(diagnostic.includes("PRIVATE-SENTINEL"), false);
+});
+
 function runServer(messages, environment = {}, entrypoint = "stdio-server.mjs") {
   return new Promise((resolve, reject) => {
     const childEnvironment = { ...process.env };
@@ -122,7 +144,7 @@ test("lists and executes verified snippet rescue", async () => {
     ],
   );
   const payload = JSON.parse(responses.find((response) => response.id === 3).result.content[0].text);
-  assert.equal(payload.status, "fix_verified");
+  assert.equal(payload.status, "fix_verified", snippetDiagnostic(payload));
   assert.equal(payload.fix_verified, true);
   assert.equal(payload.worker_execution_strategy, "sequential_fresh_children");
   assert.equal(payload.test_results[0].before.error_type, "IndexError");
@@ -145,7 +167,7 @@ test("original module mutation cannot leak into the candidate worker", async () 
   }]);
 
   const payload = JSON.parse(responses[0].result.content[0].text);
-  assert.equal(payload.status, "fix_verified");
+  assert.equal(payload.status, "fix_verified", snippetDiagnostic(payload));
   assert.equal(payload.test_results[0].before.stdout, "42\n");
   assert.equal(payload.test_results[0].after.stdout, "3.0\n");
   assert.equal(payload.worker_execution_strategy, "sequential_fresh_children");

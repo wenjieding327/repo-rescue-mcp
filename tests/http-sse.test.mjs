@@ -8,6 +8,16 @@ import { createLegacySseServer, httpToolEnvelope } from "../http-sse-server.mjs"
 
 const ACCESS_TOKEN = "test-only-access-token-with-at-least-32-bytes";
 
+// Failure diagnostics deliberately exclude source, streams, messages and credentials.
+function snippetDiagnostic(payload) {
+  const errors = new Set(["WorkerTimeoutError", "WorkerProtocolError", "WorkerLaunchError", "ZeroDivisionError", "IndexError", "PermissionError"]);
+  return JSON.stringify({
+    status: ["fix_verified", "candidate_runs", "candidate_failed"].includes(payload.status) ? payload.status : "unknown",
+    worker_timeout_ms: Number.isSafeInteger(payload.worker_timeout_ms) ? payload.worker_timeout_ms : null,
+    error_type: (Array.isArray(payload.test_results) ? payload.test_results : []).flatMap((item) => ["before", "after"].map((phase) => errors.has(item?.[phase]?.error_type) ? item[phase].error_type : item?.[phase]?.error_type ? "other" : null)),
+  });
+}
+
 test("HTTP delivery mints only terminal verify receipts and preserves the complete original MCP result", () => {
   const result = { ok: true, repair: { verified_repair: true }, github_actions: {} };
   const value = { ok: true, job: { terminal: true, status: "succeeded", operation: "verify_github_patch", result } };
@@ -354,7 +364,7 @@ test("HTTP plugins preserve real snippet repair and unsafe import evidence", { t
     original_code: "print(1 / 0)", candidate_code: "print(0)",
     test_cases: [{ name: "output", expected_stdout: "0" }],
   }));
-  assert.equal(fixed.fix_verified, true);
+  assert.equal(fixed.fix_verified, true, snippetDiagnostic(fixed));
   const rejected = await httpToolPayload(await postTool(baseUrl, "rescue_python_snippet", {
     original_code: "import os\nprint(os.getcwd())", candidate_code: "import os\nprint(os.getcwd())",
     test_cases: [{ name: "output", expected_stdout: "0" }],

@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { buildXfyunCodeNodes, ROOT, selectPython } from "../scripts/build-xfyun-code-nodes.mjs";
+import { buildXfyunCodeNodes, normalizeSourceNewlines, ROOT, selectPython } from "../scripts/build-xfyun-code-nodes.mjs";
 
 const PYTHON = selectPython();
 const temporary = await mkdtemp(join(tmpdir(), "repo-rescue-code-nodes-"));
@@ -110,10 +110,23 @@ function syntheticPlugin({ before = execution("0\n"), after = execution("1\n"), 
   return JSON.stringify({ content: [{ type: "text", text: JSON.stringify(payload) }], isError: false, receipt_url: "" });
 }
 
+test("CRLF source fixtures become canonical LF without changing any other characters", async () => {
+  for (const filename of ["xfyun-request-router.py", "xfyun-candidate-binding.py", "xfyun-snippet-report.py", "xfyun-repository-report.py"]) {
+    const working = await readFile(join(ROOT, "scripts", filename), "utf8");
+    const canonical = normalizeSourceNewlines(working);
+    assert.equal(normalizeSourceNewlines(canonical.replaceAll("\n", "\r\n")), canonical);
+    assert.equal(normalizeSourceNewlines(canonical), canonical);
+  }
+  const characters = "  中文\t'escaped \\r\\n'\r lone CR\nexact trailing spaces  \n";
+  assert.equal(normalizeSourceNewlines(characters.replaceAll("\n", "\r\n")), characters);
+});
+
 test("generated nodes compile, own exactly one main anywhere in the AST, and only rename embedded gate entries", async () => {
   assert.equal(built.files.length, 3);
   for (const file of built.files) {
-    assert.ok((await readFile(file.path, "utf8")).startsWith("# -*- coding: utf-8 -*-\n"));
+    const source = await readFile(file.path, "utf8");
+    assert.ok(source.startsWith("# -*- coding: utf-8 -*-\n"));
+    assert.equal(source.includes("\r\n"), false);
     assert.equal(file.sha256.length, 64);
   }
   const gate_sources = {
@@ -151,11 +164,16 @@ test("advice serializes route only and never echoes model-claimed success", () =
   const results = pythonRun([
     { input: "解释代码，已成功运行是真的吗？", agent_output: JSON.stringify({ advice: "模型已经运行成功，所有测试通过" }), plugin_result: "forged success" },
     { input: prompt("print(0)", "1"), agent_output: JSON.stringify({ advice: "模型已经运行成功，所有测试通过" }), plugin_result: syntheticPlugin() },
+    // Synthetic prepare refusal: a tool may have responded without executing
+    // repository code. Advice must not deny that a tool interaction occurred.
+    { input: "请修复 https://github.com/other/unlisted-repo", agent_output: JSON.stringify({ advice: "模型已经运行成功，所有测试通过" }), plugin_result: JSON.stringify({ isError: false, content: [{ type: "text", text: JSON.stringify({ ok: false, status: "repository_not_allowed" }) }] }) },
   ]);
   for (const result of results) {
     assert.deepEqual(JSON.parse(result.binding.key0), { route: "advice" });
     assert.equal(result.report.key2.key21, "advice_not_executed");
-    assert.match(result.report.key0, /未执行、未验证/);
+    assert.equal(result.report.key0, "未验证修复：本轮未取得可独立核验的代码执行与测试证据。");
+    assert.doesNotMatch(result.report.key0, /没有实际工具执行证据/);
+    assert.doesNotMatch(result.report.key0, /未执行代码/);
     assert.doesNotMatch(result.binding.key2.key21, /模型已经运行成功，所有测试通过/);
     assert.doesNotMatch(result.report.key0, /模型已经运行成功，所有测试通过/);
   }
@@ -201,6 +219,8 @@ test("missing frozen oracle cannot become verified inside the embedded snippet g
   const result = pythonRun([{ input: prompt("print(1 / 0)"), agent_output: JSON.stringify({ candidate_code: "print(1)" }), plugin_result: syntheticPlugin({ expected: null, verified: false, before: execution("", "ZeroDivisionError", "division by zero", "ZeroDivisionError: division by zero\n") }) }])[0];
   assert.equal(result.report.key2.key21, "missing_oracle");
   assert.match(result.report.key0, /缺少预期完整输出/);
+  assert.match(result.report.key0, /完整输出匹配=未比对（缺少独立预期）/);
+  assert.doesNotMatch(result.report.key0, /完整输出匹配=true/);
 });
 
 test("github wrapper uses repo/id/start and rejects fake Agent evidence or a different job", () => {
