@@ -13,6 +13,7 @@ const MAX_SESSIONS = 8;
 const MAX_PENDING_REQUESTS = 4;
 const MAX_SESSION_REQUESTS_PER_MINUTE = 120;
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_XFYUN_REQUEST_CHARS = 80_000;
 const MAX_CHILD_MESSAGE_BYTES = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 2 * 60_000;
 const KEEPALIVE_MS = 15_000;
@@ -65,6 +66,119 @@ function sendJson(response, statusCode, value) {
     "X-Content-Type-Options": "nosniff",
   });
   response.end(body);
+}
+
+// JSON.parse deliberately accepts duplicate keys. Scan its already-validated
+// grammar as well so decoded aliases ("route" / "\u0072oute") cannot override
+// a frozen field. This applies only to the new strict orchestration contract.
+function duplicateFreeJson(text) {
+  const parsed = JSON.parse(text);
+  let offset = 0;
+  const whitespace = () => { while (/[ \t\r\n]/.test(text[offset] || "!")) offset += 1; };
+  const string = () => {
+    const start = offset++;
+    while (text[offset] !== '"') offset += text[offset] === "\\" ? 2 : 1;
+    offset += 1;
+    return JSON.parse(text.slice(start, offset));
+  };
+  const value = (depth = 0) => {
+    if (depth > 64) throw new Error("JSON nesting exceeds the bounded contract.");
+    whitespace();
+    if (text[offset] === "{") {
+      offset += 1; whitespace();
+      const keys = new Set();
+      if (text[offset] !== "}") {
+        while (true) {
+          const key = string();
+          if (keys.has(key)) throw new Error("Duplicate JSON key.");
+          keys.add(key); whitespace(); offset += 1;
+          value(depth + 1); whitespace();
+          if (text[offset] !== ",") break;
+          offset += 1; whitespace();
+        }
+      }
+      offset += 1;
+    } else if (text[offset] === "[") {
+      offset += 1; whitespace();
+      if (text[offset] !== "]") {
+        while (true) {
+          value(depth + 1); whitespace();
+          if (text[offset] !== ",") break;
+          offset += 1;
+        }
+      }
+      offset += 1;
+    } else if (text[offset] === '"') string();
+    else while (offset < text.length && !",]} \t\r\n".includes(text[offset])) offset += 1;
+  };
+  value();
+  return parsed;
+}
+
+function exactFields(value, fields) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+}
+
+function boundedText(value, maximum, nonempty = false) {
+  if (typeof value !== "string" || value.length > maximum || value.includes("\0") || nonempty && !value.trim()) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(++index);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+function validRequestTimestamp(value) {
+  if (!boundedText(value, 40) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
+  const [year, month, day, hour, minute, second] = value.slice(0, 19).split(/[-T:]/).map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1]
+    && hour < 24 && minute < 60 && second < 60 && Number.isFinite(Date.parse(value));
+}
+
+/** Narrow data-only router. Never permit caller-selected MCP names or dispatches. */
+export function parseXfyunExecutionRequest(rawBody) {
+  const outer = duplicateFreeJson(rawBody);
+  if (!exactFields(outer, ["request_json"]) || !boundedText(outer.request_json, MAX_XFYUN_REQUEST_CHARS, true)) throw new Error("Invalid execution envelope.");
+  const request = duplicateFreeJson(outer.request_json);
+  if (request?.route === "advice" && exactFields(request, ["route"])) return { route: "advice", toolName: null, arguments: null };
+  if (request?.route === "snippet" && exactFields(request, ["route", "original_code", "candidate_code", "test_cases"])) {
+    if (!boundedText(request.original_code, 12_000, true) || !boundedText(request.candidate_code, 12_000, true)
+      || !Array.isArray(request.test_cases) || request.test_cases.length > 4) throw new Error("Invalid snippet arguments.");
+    for (const test of request.test_cases) {
+      if (test === null || typeof test !== "object" || Array.isArray(test)
+        || Object.keys(test).some((key) => !["name", "stdin", "expected_stdout"].includes(key))) throw new Error("Invalid case fields.");
+      for (const [field, maximum] of [["name", 200], ["stdin", 12_000], ["expected_stdout", 12_000]]) {
+        if (Object.hasOwn(test, field) && !boundedText(test[field], maximum)) throw new Error("Invalid case metadata.");
+      }
+    }
+    return { route: "snippet", toolName: "rescue_python_snippet", arguments: {
+      original_code: request.original_code, candidate_code: request.candidate_code, test_cases: request.test_cases,
+    } };
+  }
+  if (request?.route === "github" && exactFields(request, ["route", "repo_url", "job_id", "request_started_at"])) {
+    if (!boundedText(request.job_id, 43) || !/^[A-Za-z0-9_-]{43}$/.test(request.job_id)
+      || !boundedText(request.repo_url, 500) || !/^https:\/\/github\.com\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9_.-]{1,100}$/.test(request.repo_url)
+      || [".", ".."].includes(request.repo_url.split("/").at(-1)) || !validRequestTimestamp(request.request_started_at)) throw new Error("Invalid frozen job arguments.");
+    // Repository/time stay in the workflow's frozen binding for its report gate.
+    // This endpoint ONLY polls an existing capability and cannot start a job.
+    return { route: "github", toolName: "get_repair_job", arguments: { job_id: request.job_id, wait_seconds: 15 } };
+  }
+  throw new Error("Invalid execution route or fields.");
+}
+
+function safeAdviceResult() {
+  return { content: [{ type: "text", text: JSON.stringify({
+    ok: true, mode: "xfyun_safe_advice", status: "advice_only", executed: false,
+    fix_verified: false, verified_repair: false, test_results: [],
+    user_summary: "未执行任何代码或仓库任务；当前仅为未验证建议。",
+  }) }], isError: false };
 }
 
 // Delivery is separate from the MCP evidence. Existing MCP fields and content
@@ -363,13 +477,14 @@ export function createLegacySseServer({
     sseEvent(response, "endpoint", `/messages/?session_id=${encodeURIComponent(sessionId)}`);
   }
 
-  function receiveMessage(request, response, url, toolName = null) {
+  function receiveMessage(request, response, url, toolName = null, executionRoute = false) {
     if (!authenticated(request)) {
       sendJson(response, 401, { ok: false, error: "unauthorized" });
       return;
     }
+    const isHttpTool = Boolean(toolName || executionRoute);
     const sessionId = String(url.searchParams.get("session_id") || "");
-    const session = toolName ? { requests: [] } : sessions.get(sessionId);
+    const session = isHttpTool ? { requests: [] } : sessions.get(sessionId);
     if (!session) {
       sendJson(response, 404, { ok: false, error: "unknown_session" });
       return;
@@ -407,9 +522,22 @@ export function createLegacySseServer({
       if (finished) return;
       let message;
       try {
-        message = JSON.parse(Buffer.concat(chunks, received).toString("utf8"));
+        const bytes = Buffer.concat(chunks, received);
+        if (executionRoute) {
+          const execution = parseXfyunExecutionRequest(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+          if (execution.route === "advice") {
+            // Apply the same after-upload admission check but never reserve or
+            // send a worker request for advice, and never echo model report text.
+            if (!ready) { sendJson(response, 503, { ok: false, error: "session_or_worker_unavailable" }); return; }
+            if (pending.size >= MAX_PENDING_REQUESTS) { sendJson(response, 429, { ok: false, error: "request_rate_limited" }); return; }
+            sendJson(response, 200, httpToolEnvelope({ result: safeAdviceResult() }, null, receipts));
+            return;
+          }
+          toolName = execution.toolName;
+          message = execution.arguments;
+        } else message = JSON.parse(bytes.toString("utf8"));
       } catch {
-        sendJson(response, 400, { ok: false, error: "invalid_json" });
+        sendJson(response, 400, { ok: false, error: executionRoute ? "invalid_execution_request" : "invalid_json" });
         return;
       }
       if (toolName) {
@@ -442,7 +570,7 @@ export function createLegacySseServer({
       const hasId = message.id !== undefined && message.id !== null;
       // Admission must be checked after receiving the body too: concurrent uploads
       // can all pass the initial check before any request has reserved capacity.
-      if ((!toolName && !sessions.has(sessionId)) || !ready) {
+      if ((!isHttpTool && !sessions.has(sessionId)) || !ready) {
         sendJson(response, 503, { ok: false, error: "session_or_worker_unavailable" });
         return;
       }
@@ -466,7 +594,7 @@ export function createLegacySseServer({
         pending.set(internalId, {
           sessionId, originalId: message.id, timer,
           toolName,
-          httpResponse: toolName ? response : null,
+          httpResponse: isHttpTool ? response : null,
         });
       }
       try {
@@ -482,7 +610,7 @@ export function createLegacySseServer({
       }
       // HTTP plugins receive the tool result directly. SSE clients still get
       // a 202 acknowledgement and their response over the existing stream.
-      if (toolName) return;
+      if (isHttpTool) return;
       response.writeHead(202, {
         "Cache-Control": "no-store",
         "Content-Length": "0",
@@ -527,6 +655,10 @@ export function createLegacySseServer({
     }
     if (request.method === "POST" && (url.pathname === "/messages" || url.pathname === "/messages/")) {
       receiveMessage(request, response, url);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/xfyun/execute") {
+      receiveMessage(request, response, url, null, true);
       return;
     }
     if (request.method === "POST" && url.pathname.startsWith("/api/tools/")) {
