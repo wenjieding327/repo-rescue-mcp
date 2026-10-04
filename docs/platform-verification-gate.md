@@ -67,3 +67,26 @@ python -m pytest
 最终用户报告应如实区分“片段修复已验证”“缺少完整预期，未验证”“候选仍失败”“仓库作业尚未终止”和“未执行建议”，并注明只覆盖本轮代码、固定提交与记录测试范围。收据仅交付后端原始文件；报告不拼接链接、不重新抄写补丁，也不自行验签。
 
 发布前仍需取得本轮新的平台独立工具轨迹，确认三个节点和独立插件的冻结参数绑定、完整 stdout、失败关闭及异步仓库闭环，并核验同一 Bot 的实际发布和公开入口。当前 UI 接线及完整平台验收未完成，不得更新发布完成状态或提交材料为通过。
+# 2026-10-04 follow-up: bounded candidate syntax preflight
+
+The deployment follow-up canary's first real verification failed: the generated
+replacement introduced a fourth closing docstring quote. The verifier recorded
+`SyntaxError`, zero passing tests and `verified_repair=false`. The platform then
+terminated the conversation during a fresh second preparation; the precise
+platform termination cause is not established. This failed run is retained,
+not replaced by the earlier successful run.
+
+Python replacements now receive a disposable Pyodide **compile-only** check
+before Actions dispatch. The code object is never evaluated: imports, raises,
+file operations and loops in the candidate do not execute. Rejection reports
+only error type and line/column, not source or credentials; it does not consume
+the preparation capability or mint a job/receipt. Worker failure is fail-closed.
+This preliminary grammar check does not prove target-version compatibility or
+repair correctness; the existing Docker pytest verifier remains authoritative.
+
+The draft Agent permits one correction of an explicit pre-dispatch syntax
+rejection. It dispatches at most one actual verification per conversation and
+returns the terminal job to the independent report node on failure, rather than
+starting another complete cloud preparation inside that conversation. Transport
+failure is not permission to duplicate a start. Final public acceptance remains
+pending a fresh run on this deployment and the same published Bot.

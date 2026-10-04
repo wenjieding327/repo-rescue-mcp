@@ -171,6 +171,32 @@ async function main(request) {
     throw new Error(`Snippet worker accepts 1-${MAX_CASES} cases.`);
   }
   const runtime = await loadPyodide({ stdout: () => {}, stderr: () => {} });
+  // Internal parse-only preflight. Compile source to detect indentation and
+  // delimiter errors, but never evaluate the resulting code object. Imports,
+  // file operations and infinite loops in the candidate are therefore inert.
+  if (request.syntax_only === true) {
+    runtime.globals.set("_rr_source", request.code);
+    let proxy;
+    try {
+      proxy = runtime.runPython(`
+import builtins as _rr_builtins
+try:
+    _rr_builtins.compile(_rr_source, '<candidate>', 'exec')
+    _rr_parse_result = {'ok': True, 'executed': False}
+except (SyntaxError, ValueError, TypeError) as _rr_exc:
+    _rr_parse_result = {
+        'ok': False, 'executed': False,
+        'error_type': type(_rr_exc).__name__,
+        'line': getattr(_rr_exc, 'lineno', None),
+        'column': getattr(_rr_exc, 'offset', None),
+    }
+_rr_parse_result
+`);
+      return { ok: true, results: [proxy.toJs({ dict_converter: Object.fromEntries })] };
+    } finally {
+      proxy?.destroy?.();
+    }
+  }
   const results = [];
   for (const item of request.cases) {
     results.push(await executeCase(runtime, request.code, item?.stdin ?? ""));
