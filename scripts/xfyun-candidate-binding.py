@@ -3,7 +3,8 @@
 main(context, agent_output) freezes original code, stdin, oracles, repository and
 request time from the trusted router context. Agent output is one strict JSON
 object with exactly ONE candidate_code, job_id or advice key (optional one json
-fence). No model-supplied original/oracle/status/receipt is accepted. This module
+fence), or one exact frozen-route envelope containing its single candidate field.
+No model-supplied original/oracle/status/receipt is accepted. This module
 never executes/evaluates candidate code, performs I/O or authenticates a job ID.
 
 Source association remains a workflow responsibility: context must be a direct
@@ -93,12 +94,20 @@ def _frozen_context(context):
     return route, original, frozen_cases, repository, started
 
 
-def _agent_object(agent_output):
+def _agent_object(agent_output, route):
     text = _string(agent_output, MAX_AGENT_CHARS, True)
     fence = _JSON_FENCE.fullmatch(text)
     if fence:
         text = fence.group(1)
     value = _load(text)
+    # One exact route envelope is formatting only, never model evidence.
+    # Do not recursively unwrap, decode strings, or accept cross-route aliases.
+    if isinstance(value, dict) and set(value) == {route} and route in {"snippet", "github"}:
+        inner = value[route]
+        expected = "candidate_code" if route == "snippet" else "job_id"
+        if not isinstance(inner, dict) or set(inner) != {expected}:
+            raise ValueError("路由包装必须只包含对应的候选字段")
+        value = inner
     if not isinstance(value, dict) or len(value) != 1 or set(value) - {"candidate_code", "job_id", "advice"}:
         raise ValueError("Agent 必须只返回候选代码、任务标识或建议之一")
     return value
@@ -117,7 +126,7 @@ def main(context, agent_output):
     try:
         route, original, cases, repository, started = _frozen_context(context)
         result.update(original_code=original, test_cases=_json(cases), repo_url=repository, request_started_at=started)
-        value = _agent_object(agent_output)
+        value = _agent_object(agent_output, route)
         if "advice" in value:
             advice = _string(value["advice"], MAX_ADVICE_CHARS, True)
             result["report"] = "未执行、未验证。模型建议原文（不构成运行事实或通过证据）：" + _json(advice) + "。"

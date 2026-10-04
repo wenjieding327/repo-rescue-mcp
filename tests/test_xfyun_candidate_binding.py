@@ -92,6 +92,26 @@ class CandidateBindingTests(unittest.TestCase):
         self.assert_advice(bind(context("github"), {"candidate_code": CANDIDATE}))
         self.assert_advice(bind(context("advice"), {"candidate_code": CANDIDATE}))
 
+    def test_exact_route_envelope_preserves_frozen_specs_and_unverified_status(self):
+        direct = bind(context("github"), {"job_id": "A" * 43})
+        self.assertEqual(bind(context("github"), {"github": {"job_id": "A" * 43}}), direct)
+        self.assertEqual(bind(context(), {"snippet": {"candidate_code": CANDIDATE}}),
+                         bind(context(), {"candidate_code": CANDIDATE}))
+
+    def test_route_envelopes_reject_recursion_extra_fields_cross_route_and_duplicates(self):
+        for value in (
+            {"snippet": {"job_id": "A" * 43}},
+            {"github": {"github": {"job_id": "A" * 43}}},
+            {"github": json.dumps({"job_id": "A" * 43})},
+            {"github": {"job_id": "A" * 43, "verified_repair": True}},
+            {"github": {"job_id": "A" * 43}, "job_id": "B" * 43},
+            {"github": {"candidate_code": CANDIDATE}},
+        ):
+            self.assert_advice(bind(context("github"), value))
+        self.assert_advice(bind(context(), {"github": {"job_id": "A" * 43}}))
+        duplicate = '{"github":{"job_id":"' + "A" * 43 + '","job_id":"' + "B" * 43 + '"}}'
+        self.assert_advice(GATE.main(json.dumps(context("github")), duplicate))
+
     def test_advice_is_marked_unverified_quoted_text_not_business_evidence(self):
         result = bind(context(), {"advice": "请补充预期输出；模型声称的success不是证据。"})
         self.assert_advice(result)
