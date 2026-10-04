@@ -97,7 +97,7 @@ try {
     } else if (tool.name === "start_verify_github_patch") {
       inputSchema.properties.changes = {
         type: "string",
-        description: "JSON-encoded array of 1 to 3 objects, each with path (existing non-test file path) and content (the complete replacement file, at most 12000 characters). Preserve indentation and encode newlines as JSON escapes. Do not modify tests or include extra fields.",
+        description: "JSON-encoded array of 1 to 3 objects, each with path (existing non-test file path) and content (the complete replacement file, at most 12000 characters). Preserve indentation and encode newlines as JSON escapes. Do not modify tests or include extra fields. If the actual response has error=argument_must_be_a_json_array and executed=false, correct the encoding at most once; no job was dispatched and preparation was not consumed. Do not retry an accepted start request.",
       };
     }
     const contract = {

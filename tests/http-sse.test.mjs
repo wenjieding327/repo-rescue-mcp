@@ -395,8 +395,20 @@ test("HTTP JSON-array conversion rejects malformed or non-array strings without 
   for (const [name, field] of [["rescue_python_snippet", "test_cases"], ["start_verify_github_patch", "changes"]]) {
     for (const encoded of ["invalid-SECRET-SENTINEL", "{}", "null", "true", "1", '"[]"']) {
       const result = await postTool(baseUrl, name, { [field]: encoded });
-      assert.equal(result.status, 400);
-      assert.deepEqual(await result.json(), { ok: false, error: "argument_must_be_a_json_array", field });
+      assert.equal(result.status, 200);
+      const envelope = await result.json();
+      assert.equal(envelope.is_error, true);
+      assert.equal(envelope.receipt_url, "");
+      assert.doesNotMatch(JSON.stringify(envelope), /SECRET-SENTINEL/);
+      const payload = JSON.parse(JSON.parse(envelope.result_json).content[0].text);
+      assert.equal(payload.status, "invalid_request");
+      assert.equal(payload.error, "argument_must_be_a_json_array");
+      assert.equal(payload.field, field);
+      assert.equal(payload.executed, false);
+      assert.equal(payload.fix_verified, false);
+      assert.equal(payload.verified_repair, false);
+      assert.equal(payload.correction_allowed, true);
+      assert.equal(payload.job, undefined);
     }
     assert.equal((await postTool(baseUrl, name, { [field]: "[".repeat(2 * 1024 * 1024) })).status, 413);
     assert.equal((await postTool(baseUrl, name, { [field]: "[]" }, { Authorization: "" })).status, 401);
@@ -450,6 +462,17 @@ test("HTTP verify string changes reach unchanged preflight, cannot inject tool s
   assert.equal(converted.ok, false);
   assert.equal(converted.status, "preparation_required");
   assert.equal(converted.job, undefined);
+  const malformed = await httpToolPayload(await postTool(baseUrl, "start_verify_github_patch", {
+    ...args, changes: JSON.stringify(JSON.stringify(args.changes)),
+  }), true);
+  assert.equal(malformed.executed, false);
+  assert.equal(malformed.error, "argument_must_be_a_json_array");
+  // Correcting a rejected encoding still reaches the SAME original preflight;
+  // it neither consumes preparation nor dispatches a verify job by itself.
+  const corrected = await httpToolPayload(await postTool(baseUrl, "start_verify_github_patch", {
+    ...args, changes: JSON.stringify(args.changes),
+  }), true);
+  assert.deepEqual(corrected, original);
   const rejected = await httpToolPayload(await postTool(baseUrl, "start_verify_github_patch", {
     ...args, changes: JSON.stringify([{ path: "src/app.py", content: "fixed", method: "tools/list" }]),
   }));
