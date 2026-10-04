@@ -553,7 +553,21 @@ export function createLegacySseServer({
           let decoded;
           try { decoded = JSON.parse(message[arrayField]); } catch { /* Reject below without echoing input. */ }
           if (!Array.isArray(decoded)) {
-            sendJson(response, 400, { ok: false, error: "argument_must_be_a_json_array", field: arrayField });
+            // A tool-argument error is not a transport outage. XFYun aborts the
+            // whole ReACT workflow on HTTP 400, preventing a bounded correction.
+            // Reject before dispatch (and before consuming a preparation), but
+            // deliver the error through the declared tool-result envelope. Do
+            // not repair strings, decode recursively, or echo caller content.
+            sendJson(response, 200, httpToolEnvelope({ result: {
+              isError: true,
+              content: [{ type: "text", text: JSON.stringify({
+                ok: false, status: "invalid_request", executed: false,
+                fix_verified: false, verified_repair: false,
+                error: "argument_must_be_a_json_array", field: arrayField,
+                correction_allowed: true,
+                message: `Send ${arrayField} as a JSON-encoded array, not a quoted JSON string or object. No worker request was dispatched; correct the encoding at most once.`,
+              }) }],
+            } }, toolName, receipts));
             return;
           }
           message = { ...message, [arrayField]: decoded };

@@ -1,6 +1,6 @@
 # 独立验证门禁（同一工作流草稿接线中）
 
-状态：2026-10-03。当前方案是在同一 workflow `648761` / Bot `5773337` 的 draft 中接入三个生成的 Python 节点和一个独立执行插件。接线及平台验收尚未完成，未据此发布。生成文件、通过本地测试或回放历史 fixture，都不能替代新的平台调用轨迹，也不得把历史失败改记为通过。
+状态：2026-10-04。同一 workflow `648761` / Bot `5773337` 的 draft 已接入三个生成的 Python 节点和一个独立执行插件。平台片段正负例及新的 canary 仓库闭环已取得真实证据，但参数错误的恢复路径仍在修复与验收，尚未据此发布最终版本。生成文件、通过本地测试或回放历史 fixture，都不能替代新的平台调用轨迹，也不得把历史失败改记为通过。
 
 ## 三个 paste-ready 节点，底层四个模块
 
@@ -42,7 +42,9 @@
 
 完整仓库修复仍需既有 prepare → poll 至终态 → 生成最小补丁 → verify → poll 的异步流程，由仓库编排 Agent 使用已有插件完成，并返回本轮真实 verify job ID 给 binding。准备 capability、commit、baseline 必须绑定真实本轮结果，不复用历史任务或重复 start 代替轮询。独立 rescue_execute 再查询该 ID，final-report 校验冻结仓库、ID、请求起点、新鲜度、同命令 Docker pytest 失败到通过、未缩减范围与原始 artifact 哈希；缺证据、过期、排队或失败均不能变绿。
 
-当前同一 workflow `648761` 的 UI 接线仍在进行。节点输入引用、平台 Python 标准库支持、插件持久化 Body/鉴权配置、结束模板和真实仓库自主闭环均需现场确认。平台保存 draft 或看到新节点不等于验收完成，更不等于 Bot 发布。
+同一 workflow `648761` 的单链输入引用、独立插件和结束模板已用真实调用检查。2026-10-04 的 G-CANARY-1004 从新 prepare 开始，经 verify 和独立 poll，固定目标提交 `04c26b6ee1b10e64336efffdf130716b52be0266`、同一 `python -m pytest -q`：原始 2 passed / 1 failed，候选 3 passed / 0 failed，仅修改 `src/repo_rescue_canary/parser.py`。控制器 Actions 成功不等于修复成功，结论来自实际 repair/evidence。上一次 G-CANARY-final 因 changes 编码错误而 HTTP 400 中断的失败记录仍保留，不改记为通过。
+
+HTTP 直接工具的两个数组文本字段（test_cases、changes）仍仅接受原生数组或恰好一次 JSON 解码后的数组，不接受递归解码、对象或伪造工具名。错误字符串现以 HTTP 200 的声明工具 envelope 返回 `is_error=true`、`status=invalid_request`、`executed=false`、`verified_repair=false`，无 job / receipt；这是可被 Agent 读取的拒绝，不是成功。拒绝发生在 worker 派发前，不消费 prepare。Agent 仅在该明确错误且 `correction_allowed=true` 时纠正编码一次；其他 start 错误或响应丢失不得盲目重复派发。鉴权、大小、Origin、协议格式等传输错误仍保留原 HTTP 拒绝状态。新恢复路径部署和平台验收通过后，才允许发布；保存 draft 不等于发布。
 
 ## 本地验证与发布边界
 
