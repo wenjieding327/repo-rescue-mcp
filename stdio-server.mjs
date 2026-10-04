@@ -402,7 +402,7 @@ function workerFailure(errorType, message) {
   };
 }
 
-function runSnippetWorker(code, cases) {
+function runSnippetWorker(code, cases, syntaxOnly = false) {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
@@ -489,7 +489,7 @@ function runSnippetWorker(code, cases) {
       }
     });
     child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify({ code, cases: cases.map((item) => ({ stdin: String(item?.stdin ?? "") })) }));
+    child.stdin.end(JSON.stringify({ code, cases: cases.map((item) => ({ stdin: String(item?.stdin ?? "") })), syntax_only: syntaxOnly }));
   });
 }
 
@@ -715,6 +715,22 @@ async function callPlatformTool(name, args) {
     }
     if (name === "start_verify_github_patch") {
       const verifiedArgs = platformVerifyArguments(args);
+      for (const change of verifiedArgs.changes) {
+        if (!change.path.endsWith(".py")) continue;
+        const parsed = await runSnippetWorker(change.content, [{}], true);
+        if (!parsed.ok) {
+          return { ok: false, status: "syntax_preflight_unavailable", executed: false,
+            verified_repair: false, correction_allowed: false,
+            message: "Parse-only preflight did not complete. No verification was dispatched." };
+        }
+        const result = parsed.results[0];
+        if (!result.ok) {
+          return { ok: false, status: "candidate_syntax_invalid", executed: false,
+            verified_repair: false, correction_allowed: true,
+            syntax: { error_type: result.error_type, line: result.line, column: result.column },
+            message: "Python candidate does not compile. Correct its syntax at most once; no worker verification was dispatched and preparation was not consumed. Syntax acceptance is not repair verification." };
+        }
+      }
       const preparationJobId = verifiedArgs.preparation_job_id;
       delete verifiedArgs.preparation_job_id;
       return bridge.startVerify(preparationJobId, verifiedArgs);

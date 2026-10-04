@@ -55,6 +55,43 @@ function runServer(messages, environment = {}, entrypoint = "stdio-server.mjs") 
   });
 }
 
+test("repository syntax preflight is parse-only and rejects malformed candidates before dispatch", async () => {
+  const args = {
+    repo_url: "https://github.com/wenjieding327/repo-rescue-canary",
+    preparation_job_id: "N".repeat(43), expected_commit: "a".repeat(40),
+    expected_baseline_sha256: "b".repeat(64),
+  };
+  const programs = [
+    '\"\"\"A docstring.\"\"\"\"\ndef f():\n    return 1\n',
+    'def f():\nreturn 1\n',
+    'import os\nraise RuntimeError("MUST-NOT-EXECUTE")\nwhile True: pass\n',
+  ];
+  const replies = await runServer(programs.map((content, i) => ({
+    jsonrpc: "2.0", id: i + 1, method: "tools/call",
+    params: { name: "start_verify_github_patch", arguments: {
+      ...args, changes: [{ path: "src/app.py", content }],
+    } },
+  })), {
+    REPO_RESCUE_NODE_TOOLSET: "platform", REPO_RESCUE_GITHUB_TOKEN: "test-only-not-a-real-token",
+    REPO_RESCUE_ACTIONS_REF: "main",
+    REPO_RESCUE_ALLOWED_REPOS: "wenjieding327/repo-rescue-canary,wenjieding327/repo-rescue-mcp",
+  });
+  for (const id of [1, 2]) {
+    const payload = JSON.parse(replies.find((r) => r.id === id).result.content[0].text);
+    assert.equal(payload.status, "candidate_syntax_invalid");
+    assert.equal(payload.executed, false);
+    assert.equal(payload.verified_repair, false);
+    assert.equal(payload.correction_allowed, true);
+    assert.equal(payload.syntax.line, id === 1 ? 1 : 2);
+    assert.equal(payload.job, undefined);
+  }
+  const inert = JSON.parse(replies.find((r) => r.id === 3).result.content[0].text);
+  // Compile succeeds without importing os, raising or entering the loop. The
+  // unchanged preparation capability guard must still reject this request.
+  assert.equal(inert.status, "preparation_required");
+  assert.equal(JSON.stringify(replies).includes("MUST-NOT-EXECUTE"), false);
+});
+
 test("runs original and candidate in sequential fresh-worker invocations", async () => {
   let activeWorkers = 0;
   let maximumActiveWorkers = 0;
